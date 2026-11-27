@@ -3429,11 +3429,21 @@ function exploreUpdate(dt){
   if(form){formUpdate();mouseClick=null;return;}
   if(lib){libUpdate();mouseClick=null;return;}
   if(profileOpen){
-    const pn=Math.max(1,libPlayers().length);
+    const plist=libPlayers(),pn=Math.max(1,plist.length);
     if(profileSel>=pn)profileSel=0;
     if(hit('ArrowUp','w','W'))profileSel=(profileSel+pn-1)%pn;
     if(hit('ArrowDown','s','S'))profileSel=(profileSel+1)%pn;
     if(hit('x','X','Escape'))profileOpen=false;
+    if(mouseClick&&plist.length){
+      /* 行タップ／クリックで選択（ライブラリと同じ方式。座標は drawProfile の
+         行描画＝y=104+i*30・反転矩形 (76,y-18,300,26) と一致させる。
+         Phaser 版も Core の mouseClick 経由でそのまま効く） */
+      const top=Math.min(Math.floor(profileSel/PROF_ROWS)*PROF_ROWS,Math.max(0,plist.length-PROF_ROWS));
+      for(let i=0;i<PROF_ROWS&&top+i<plist.length;i++){
+        const y=104+i*30;
+        if(mouseClick.x>=76&&mouseClick.x<376&&mouseClick.y>=y-18&&mouseClick.y<y+8){profileSel=top+i;break;}
+      }
+    }
     mouseClick=null;return;
   }
   if(dlg){dialogUpdate();return;}
@@ -3697,7 +3707,7 @@ function drawProfile(){
   ctx.fillText(car?('通算：'+car.matches+'試合 '+car.wins+'勝　得点'+car.pts+'（スパイク'+car.spike+'・ブロック'+car.block+'・エース'+car.ace+'）　ディグ'+car.dig):'通算：まだ試合に出ていない',420,406);
   ctx.font='15px sans-serif';ctx.fillStyle='#eef';ctx.fillText('紹介',420,428);
   ctx.font='15px sans-serif';wrapText(p.intro,436,448,420,22);
-  ctx.fillStyle='#9ab';ctx.font='12px sans-serif';ctx.fillText('↑↓で選択　Xで閉じる',420,486);
+  ctx.fillStyle='#9ab';ctx.font='12px sans-serif';ctx.fillText('↑↓／タップで選択　Xで閉じる',420,486);
 }
 
 /* ---------- 選手ライブラリ画面（Lキー：所持一覧＋プロフィール／編成／スカウト候補） ---------- */

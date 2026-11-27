@@ -1019,6 +1019,9 @@ class CoreInput{
 
 /* ---------- スマホ対応: オンスクリーン・タッチUI（全シーン共通の重ねシーン） ----------
    仮想十字キー（移動）と Z／X／L／F ボタンを、タッチ端末でのみ表示する。
+   会話・メニュー・ライブラリ・編成・プロフィール・試合のコマンド選択中は
+   十字キーを隠し、決定／戻るだけを画面右端の退避位置へ移す（会話ウィンドウや
+   メニューにボタンが重なって文字が読めなくなる問題への対処）。
    入力は ACTIVE_INPUT（現在のゲームシーンの CoreInput）の held／pressQ へ
    キーボードと同じキー名で流すため、Core 側は無改造でタッチ操作できる。
    タイトル／会話／メニュー／ライブラリ／試合コマンドは、画面タップ自体も
@@ -1046,6 +1049,7 @@ class TouchScene extends Phaser.Scene{
   build(){
     if(this.built)return;
     this.built=true;FS_TOUCH_ON=true;
+    this.uiMode=false; /* UI表示中レイアウトかどうか（update で切替） */
     const D=990; /* 全シーンより前面 */
     this.g=this.add.graphics().setDepth(D);
     const defs=[
@@ -1061,41 +1065,81 @@ class TouchScene extends Phaser.Scene{
       {x:882,y:390,k:'f',label:'絞込',sub:'F',hold:false,s:48},
     ];
     for(const def of defs)this.addBtn(def,D);
-    /* 縦持ち時の横持ち推奨案内（上部の帯。タップは妨げない） */
-    this.hintBg=this.add.rectangle(480,26,640,36,0x080c1c,0.85).setDepth(D+5).setVisible(false);
-    this.hintT=this.add.text(480,26,'横向き推奨：端末を横にすると大きく表示されます',{fontFamily:FONT,fontSize:'15px',color:'#ffd76a'}).setOrigin(0.5).setDepth(D+6).setVisible(false);
+    this.redrawBtns();
+    /* 縦持ち時の横持ち推奨案内（タップは妨げない）。
+       帯は HUD（探索: y10〜66／試合: スコアボード y8〜52）の下に置き、
+       HUD行と縦に並ぶレイアウトにする（重なって文字が潰れる問題の解消） */
+    this.hintBg=this.add.rectangle(480,88,640,36,0x080c1c,0.85).setDepth(D+5).setVisible(false);
+    this.hintT=this.add.text(480,88,'横向き推奨：端末を横にすると大きく表示されます',{fontFamily:FONT,fontSize:'15px',color:'#ffd76a'}).setOrigin(0.5).setDepth(D+6).setVisible(false);
   }
   addBtn(def,depth){
-    const half=def.s/2;
-    const rect={x1:def.x-half,y1:def.y-half,x2:def.x+half,y2:def.y+half};
+    const rect={x1:0,y1:0,x2:0,y2:0};
     FS_TOUCH_RECTS.push(rect);
-    this.add.text(def.x,def.y-(def.sub?9:0),def.label,{fontFamily:FONT,fontSize:(def.s>=70?'19px':'15px'),color:'#ffffff',fontStyle:'bold'}).setOrigin(0.5).setDepth(depth+2);
-    if(def.sub)this.add.text(def.x,def.y+13,def.sub,{fontFamily:FONT,fontSize:'10px',color:'#99c2ff'}).setOrigin(0.5).setDepth(depth+2);
+    const labelT=this.add.text(def.x,def.y-(def.sub?9:0),def.label,{fontFamily:FONT,fontSize:(def.s>=70?'19px':'15px'),color:'#ffffff',fontStyle:'bold'}).setOrigin(0.5).setDepth(depth+2);
+    const subT=def.sub?this.add.text(def.x,def.y+13,def.sub,{fontFamily:FONT,fontSize:'10px',color:'#99c2ff'}).setOrigin(0.5).setDepth(depth+2):null;
     const zone=this.add.zone(def.x,def.y,def.s,def.s).setInteractive();
-    const btn={def:def,pointers:new Set()};
+    const btn={def:def,pointers:new Set(),zone:zone,labelT:labelT,subT:subT,rect:rect,
+               vis:true,cx:def.x,cy:def.y,cs:def.s};
     zone.on('pointerdown',p=>{btn.pointers.add(p.id);this.applyBtn(btn);});
     const release=p=>{if(btn.pointers.delete(p.id)&&!btn.pointers.size)this.releaseBtn(btn);};
     zone.on('pointerup',release);
     zone.on('pointerout',release);
     this.btns.push(btn);
-    this.drawBtn(btn,false);
+    this.syncBtnGeom(btn);
+  }
+  /* ボタンの現在位置・大きさ・表示状態を、当たり判定ゾーン／ラベル／
+     タップ除外矩形（FS_TOUCH_RECTS）へ反映する */
+  syncBtnGeom(btn){
+    const half=btn.cs/2;
+    btn.zone.setPosition(btn.cx,btn.cy);
+    if(btn.vis)btn.zone.setInteractive();else btn.zone.disableInteractive();
+    btn.labelT.setVisible(btn.vis);
+    btn.labelT.setPosition(btn.cx,btn.cy-(btn.def.sub?9:0));
+    btn.labelT.setFontSize(btn.cs>=70?'19px':'15px');
+    if(btn.subT){btn.subT.setVisible(btn.vis);btn.subT.setPosition(btn.cx,btn.cy+13);}
+    if(btn.vis){btn.rect.x1=btn.cx-half;btn.rect.y1=btn.cy-half;btn.rect.x2=btn.cx+half;btn.rect.y2=btn.cy+half;}
+    else{btn.rect.x1=-1;btn.rect.y1=-1;btn.rect.x2=-1;btn.rect.y2=-1;}
+  }
+  /* レイアウト切替: 会話・メニュー・ライブラリ・編成・プロフィール・
+     試合のコマンド選択など UI が開いている間は、移動できないので
+     仮想十字キーを消し、編成／絞込も消す。決定／戻るだけを、会話ウィンドウ
+     （y428〜）や各種メニュー・パネル（x≦900）と重ならない画面右端の
+     退避位置（x≧900 の帯、ウィンドウ上端より上）に残す。
+     会話送りは従来どおり会話ウィンドウ自体のタップでもできる */
+  applyLayout(){
+    const ui=this.uiMode;
+    for(const btn of this.btns){
+      const k=btn.def.k;
+      if(!ui){btn.vis=true;btn.cx=btn.def.x;btn.cy=btn.def.y;btn.cs=btn.def.s;}
+      else if(k==='z'){btn.vis=true;btn.cx=928;btn.cy=380;btn.cs=56;}
+      else if(k==='x'){btn.vis=true;btn.cx=930;btn.cy=285;btn.cs=54;}
+      else btn.vis=false;
+      if(!btn.vis&&btn.pointers.size){btn.pointers.clear();if(ACTIVE_INPUT)ACTIVE_INPUT.held[btn.def.k]=false;}
+      this.syncBtnGeom(btn);
+    }
+    this.redrawBtns();
   }
   applyBtn(btn){
     const inp=ACTIVE_INPUT;if(!inp)return;
     if(!btn.def.hold)inp.pressQ.push(btn.def.k); /* 押下エッジ（決定など） */
     inp.held[btn.def.k]=true;
-    this.drawBtn(btn,true);
+    this.redrawBtns();
   }
   releaseBtn(btn){
     if(ACTIVE_INPUT)ACTIVE_INPUT.held[btn.def.k]=false;
-    this.drawBtn(btn,false);
+    this.redrawBtns();
+  }
+  redrawBtns(){
+    if(!this.g)return;
+    this.g.clear();
+    for(const btn of this.btns)if(btn.vis)this.drawBtn(btn,btn.pointers.size>0);
   }
   drawBtn(btn,on){
-    const def=btn.def,half=def.s/2,g=this.g;
+    const half=btn.cs/2,g=this.g;
     g.fillStyle(on?0x33507e:0x0a1022,on?0.92:0.62);
     g.lineStyle(2,0x8fb7ff,on?1:0.75);
-    g.fillRoundedRect(def.x-half,def.y-half,def.s,def.s,14);
-    g.strokeRoundedRect(def.x-half,def.y-half,def.s,def.s,14);
+    g.fillRoundedRect(btn.cx-half,btn.cy-half,btn.cs,btn.cs,14);
+    g.strokeRoundedRect(btn.cx-half,btn.cy-half,btn.cs,btn.cs,14);
   }
   update(){
     if(!this.built)return;
@@ -1103,6 +1147,10 @@ class TouchScene extends Phaser.Scene{
     const portrait=window.innerWidth<window.innerHeight;
     if(this.hintT)this.hintT.setVisible(portrait);
     if(this.hintBg)this.hintBg.setVisible(portrait);
+    /* Core の UI 状態を見てレイアウトを切り替える */
+    const C=(typeof Core!=='undefined')?Core:null;
+    const ui=!!(C&&(C.dlg||C.menu||C.lib||C.form||C.profileOpen));
+    if(ui!==this.uiMode){this.uiMode=ui;this.applyLayout();}
   }
 }
 
@@ -1386,7 +1434,7 @@ function viewProfile(v){
   v.text(420,TY(406,13),car?('通算：'+car.matches+'試合 '+car.wins+'勝　得点'+car.pts+'（スパイク'+car.spike+'・ブロック'+car.block+'・エース'+car.ace+'）　ディグ'+car.dig):'通算：まだ試合に出ていない',13,'#ccffee');
   v.text(420,TY(428,15),'紹介',15,'#eef');
   v.text(436,436,wrapJa(p.intro||'',420,'15px sans-serif'),15,'#ffffff',{ls:7});
-  v.text(420,TY(486,12),'↑↓で選択　Xで閉じる',12,'#99aabb');
+  v.text(420,TY(486,12),'↑↓／タップで選択　Xで閉じる',12,'#99aabb');
 }
 /* ---------- Core の選手ライブラリ（lib）を描く ---------- */
 function viewLibrary(v){
