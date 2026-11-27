@@ -1,0 +1,1802 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ファイアーシックス（Phaser版）</title>
+<style>
+  html,body{margin:0;padding:0;background:#10131f;color:#eef;font-family:"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;}
+  #boot-msg{max-width:960px;margin:40px auto;padding:16px;font-size:15px;line-height:1.7;color:#cfe;}
+  #game canvas{display:block;margin:0 auto;}
+</style>
+</head>
+<body>
+<div id="boot-msg">読み込み中…（ゲーム本体のデータ／ロジックを読み込んでいます）</div>
+<div id="game"></div>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+<script>
+/* CDN 読み込み失敗時の案内（本体スクリプトは Phaser 前提で書かれているため、
+   Phaser が無い場合はここで理由を表示して止める） */
+window.addEventListener('load',function(){
+  if(!window.Phaser){
+    var m=document.getElementById('boot-msg');
+    if(m)m.textContent='起動エラー：Phaser（CDN）の読み込みに失敗しました。通信環境を確認して、再読み込みしてください。';
+  }
+});
+</script>
+<script>
+"use strict";
+/* ============================================================
+   ファイアーシックス Phaser版 ― フェーズ6 第4段階（グラフィック強化）
+   第4段階の内容: ドット絵を 48×64 に精密化（2段シェーディング＋輪郭線）、
+   試合中のアクションポーズ（スパイク／レシーブ／トス／ブロック）、
+   ボールの残像・スピンとスパイク決定時のヒットエフェクト、
+   カットインのイラスト差し替え（3段フォールバック: 本人イラスト
+   assets/cutin/<フルネーム（空白除去）> → 属性×性別の汎用イラスト
+   assets/cutin/generic-<属性キー>-<性別> → 顔ドット絵。実ファイルは
+   manifest.json にある分だけ読み、WebP 優先・PNG フォールバック）、
+   探索画面の装飾レイヤー
+   （大きな樹冠・建物の屋根／看板／窓・商店街ファサード・小物）。
+   第3段階までの内容: 選手／NPC のドット絵歩行スプライト（4方向×3コマ、
+   髪型6種・肌色を名前から決定的に割当）、マップタイルの質感付け、
+   試合コートの木目フロア＋観客席＋ネット、カットインの顔ドット絵と
+   属性エフェクト、タイトル／会話／メニューのUIポリッシュ。
+   ------------------------------------------------------------
+   データ／ロジックの扱い（二重管理を避けるための方式）:
+   起動時に同フォルダのゲーム本体（公開構成では core.html、開発構成では
+   index.html。候補を順に試して取得できた方を使う）を fetch し、その
+   <script> を抽出して、DOMスタブ環境で評価する（リポジトリの Node テスト
+   test-v07〜v16 が使うのと同じ手法）。これにより本体（現行 v1.0.3）の
+   データ層（選手250人・技・マップ・イベント定義）とロジック層
+   （対決計算・特訓・装備・セーブ・試合状態機械・ライブラリ／編成の
+   更新処理）を「Core」としてそのまま共有する。
+   セーブは実 localStorage を渡すため、保存先キー
+   (SAVE_KEY='asanagi_vb_save_v01'／演出速度 'firesix_fx') も本体と
+   完全に共通で、セーブデータは相互に読み書きできる。
+   Core 側の Canvas 描画ループは requestAnimationFrame スタブで
+   起動しない。入力と描画は Phaser 側が持つ:
+   - 入力: Phaser が受けたキー／クリックを、Core の入力モデル
+     （keys=押しっぱなし／pressed=押した瞬間／mouseClick）へ
+     ブリッジ関数（__hold／__press／__click）で流し込む。
+   - 駆動: 毎フレーム Core の更新関数（titleUpdate／exploreUpdate／
+     matchUpdate／dialogUpdate）をブリッジ（__stepTitle 等）で進める。
+     これにより試合のラリー進行・加入／章イベント・クリア後ルート・
+     ライブラリ／スカウト／合体技／編成はすべて Core 側の実装が
+     そのまま動き、Phaser は Core の状態（scene／M／dlg／menu／lib／
+     form／profileOpen）を描画するだけになる。
+   Core 本体はこのファイルからは一切変更していない（並存）。
+   ============================================================ */
+
+/* ---------- Core ローダ ---------- */
+/* Core 本体のファイル名は構成によって異なる（公開構成=core.html／
+   開発構成=index.html）。候補を順に試し、取得できたものを Core とする */
+async function loadCore(){
+  const CORE_FILES=['core.html','index.html'];
+  let src=null,lastErr=null;
+  for(const f of CORE_FILES){
+    try{
+      const res=await fetch(f);
+      if(!res.ok)throw new Error('HTTP '+res.status);
+      const html=await res.text();
+      const m=html.match(/<script>([\s\S]*)<\/script>/);
+      if(!m)throw new Error('ゲーム本体スクリプトを抽出できませんでした');
+      src=m[1];break;
+    }catch(e){lastErr=e;}
+  }
+  if(src===null)throw new Error('ゲーム本体（'+CORE_FILES.join('／')+'）の取得に失敗しました'+(lastErr?'：'+lastErr.message:''));
+  /* DOMスタブ: 何を呼ばれても自分自身を返す万能プロキシ（テストハーネスと同方式）。
+     getElementById はこれを返し、querySelectorAll は空配列を返す */
+  function makeUni(){
+    const f=function(){};
+    const u=new Proxy(f,{
+      get:(t,k)=>{if(k===Symbol.toPrimitive)return ()=>0;return u;},
+      apply:()=>u,set:()=>true});
+    return u;
+  }
+  const uni=makeUni();
+  const documentStub={
+    getElementById:()=>uni,
+    querySelectorAll:()=>[],
+    addEventListener:()=>{},
+    createElement:()=>uni,
+    body:uni,
+  };
+  const noop=()=>{};
+  /* セーブ共有のため localStorage は実物を渡す。取得できない環境ではメモリ代替
+     （その場合 本体とのセーブ共有はできない） */
+  let storage;
+  try{storage=window.localStorage;storage.getItem('__probe__');}
+  catch(e){const mem={};storage={getItem:k=>(k in mem?mem[k]:null),setItem:(k,v)=>{mem[k]=String(v);},removeItem:k=>{delete mem[k];}};}
+  const exportTail=
+    '\nfunction __press(){for(var i=0;i<arguments.length;i++)pressed[arguments[i]]=true;}'+
+    '\nfunction __click(x,y){mouseClick={x:x,y:y};}'+
+    '\nfunction __hold(o){for(const k in keys)delete keys[k];for(const k in o)if(o[k])keys[k]=true;}'+
+    '\nfunction __stepTitle(){titleUpdate();pressed={};mouseClick=null;}'+
+    '\nfunction __stepExplore(dt){exploreUpdate(dt);pressed={};mouseClick=null;}'+
+    '\nfunction __stepMatch(dt){if(dlg&&!dlg.choices){dialogUpdate();}else if(M){matchUpdate(dt);}pressed={};mouseClick=null;}'+
+    '\n;return {'+
+    'get G(){return G;},set G(v){G=v;},'+
+    'get curMapId(){return curMapId;},set curMapId(v){curMapId=v;},'+
+    'get scene(){return scene;},get M(){return M;},get menu(){return menu;},get dlg(){return dlg;},'+
+    'get lib(){return lib;},get form(){return form;},'+
+    'get profileOpen(){return profileOpen;},get profileSel(){return profileSel;},'+
+    'get titleSel(){return titleSel;},get titleWarn(){return titleWarn;},get player(){return player;},'+
+    'SAVE_KEY:SAVE_KEY,PLAYER_DB:PLAYER_DB,SCHOOL_OF:SCHOOL_OF,'+
+    'MAPS:MAPS,TILE:TILE,MW:MW,MH:MH,curMap:curMap,solid:solid,spotAt:spotAt,'+
+    'npcLines:npcLines,INTRO_SCENE:INTRO_SCENE,MOB_TEAMS:MOB_TEAMS,'+
+    'saveGame:saveGame,loadGame:loadGame,hasSave:hasSave,validSave:validSave,ensureSave:ensureSave,'+
+    'goalText:goalText,hudGoalLine:hudGoalLine,coreCount:coreCount,joinStep:joinStep,'+
+    'STAT_NAMES:STAT_NAMES,ELEM:ELEM,RANK:RANK,tech:tech,'+
+    'baseOf:baseOf,progOf:progOf,effSt:effSt,effPlayer:effPlayer,'+
+    'libPlayers:libPlayers,teamPlayers:teamPlayers,teamProblem:teamProblem,'+
+    'trainCheck:trainCheck,doTrain:doTrain,'+
+    'buyEquip:buyEquip,equipOf:equipOf,equipSlotShort:equipSlotShort,equipSlotText:equipSlotText,equipPriceOf:equipPriceOf,'+
+    'EQ_SHOES:EQ_SHOES,EQ_UNIFORM:EQ_UNIFORM,EQ_SUP:EQ_SUP,EQ_SUP_PARTS:EQ_SUP_PARTS,EQUIP_TIERS:EQUIP_TIERS,'+
+    'MATCHES:MATCHES,matchDef:matchDef,currentMatchDef:currentMatchDef,PRACTICE_KASHIWA:PRACTICE_KASHIWA,AI_LEVELS:AI_LEVELS,'+
+    'SLOT_POS:SLOT_POS,slotPos:slotPos,mkRuntime:mkRuntime,'+
+    'duelVal:duelVal,fpFactor:fpFactor,elemMult:elemMult,servePowOf:servePowOf,lucky:lucky,'+
+    'fxFast:fxFast,setFx:setFx,'+
+    'COMBO_TECHS:COMBO_TECHS,comboState:comboState,ROLE_LABEL:ROLE_LABEL,roleOf:roleOf,LEARN:LEARN,'+
+    'LV_MAX:LV_MAX,expNeed:expNeed,LIB_MAX:LIB_MAX,SCOUT_SCHOOLS:SCOUT_SCHOOLS,'+
+    'buildCandidates:buildCandidates,scoutList:scoutList,scoutRows:scoutRows,scoutScrollTop:scoutScrollTop,'+
+    'libScrollTop:libScrollTop,formScrollTop:formScrollTop,isAwake:isAwake,awakeLeft:awakeLeft,'+
+    'traditionReady:traditionReady,PROF_ROWS:PROF_ROWS,FORM_ROWS:FORM_ROWS,LIB_ROWS:LIB_ROWS,'+
+    'startMatch:startMatch,startPractice:startPractice,mobEncounter:mobEncounter,openFormation:openFormation,'+
+    '__press:__press,__click:__click,__hold:__hold,'+
+    '__stepTitle:__stepTitle,__stepExplore:__stepExplore,__stepMatch:__stepMatch'+
+    '};';
+  const factory=new Function('document','localStorage','addEventListener','removeEventListener',
+    'requestAnimationFrame','cancelAnimationFrame',src+exportTail);
+  return factory(documentStub,storage,noop,noop,noop,noop);
+}
+
+let Core=null; /* loadCore() の戻り（全シーンから参照する） */
+const FONT='"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif';
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const C16=s=>parseInt(String(s).replace('#',''),16);
+
+/* 日本語の文字単位折り返し（v1.0 の wrapText と同じ測り方） */
+const _mc=document.createElement('canvas').getContext('2d');
+function wrapJa(text,widthPx,font){
+  _mc.font=font;
+  const lines=[];let line='';
+  for(const ch of String(text)){
+    if(_mc.measureText(line+ch).width>widthPx){lines.push(line);line=ch;}
+    else line+=ch;
+  }
+  if(line)lines.push(line);
+  return lines.join('\n');
+}
+/* ---------- ドット絵ユーティリティ（第3段階） ---------- */
+function hashStr(s){let h=2166136261;s=String(s);for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
+/* 色を f 倍に暗く／明るくする（'#rgb' 形式にも対応） */
+function shade(hex,f){
+  let s=String(hex).replace('#','');
+  if(s.length===3)s=s.split('').map(c=>c+c).join('');
+  const n=parseInt(s,16);
+  const r=clamp(Math.round(((n>>16)&255)*f),0,255),
+        g=clamp(Math.round(((n>>8)&255)*f),0,255),
+        b=clamp(Math.round((n&255)*f),0,255);
+  return 'rgb('+r+','+g+','+b+')';
+}
+/* 決定的乱数（タイルの質感付け用。同じ入力なら同じ模様になる） */
+function tileRand(seed){let s=(seed>>>0)||1;return ()=>{s=(Math.imul(s,1664525)+1013904223)>>>0;return s/4294967296;};}
+const SKIN_TONES=['#f6cf9f','#f2c79b','#eebd8d','#e0aa72'];
+
+/* ---------- テクスチャ生成（プログラム生成のドット絵） ---------- */
+/* タイルセット: v1.0 の drawExplore のタイル描画を 32×32 タイルとして再現する。
+   地面／通路の色はマップごとに違うため、マップ別に生成する */
+const CHAR_TO_TILE={'.':0,'P':1,'C':2,'T':3,'B':4,'D':5,'S':6,'F':7,'W':8};
+/* タイルのバリエーション割り当て（描画側のみ。Core の MAPS は不変）
+   9:地面・明 / 10:地面・暗 / 11:地面・花or汚れ / 12:道・縁石 / 13:道・暗 /
+   14:壁・窓あり / 15:壁・縦目地 / 16:地面・土パッチ / 17:花壇・密 */
+function tileIndexFor(mapId,ch,x,y){
+  const baseIdx=CHAR_TO_TILE[ch];
+  if(baseIdx===undefined)return 0;
+  const h=hashStr(mapId+':'+x+','+y)%100;
+  if(ch==='.'){
+    if(mapId==='school'){if(h<10)return 9;if(h<20)return 10;if(h<26)return 11;if(h<31)return 16;}
+    else{if(h<12)return 9;if(h<24)return 10;if(h<29)return 16;}
+    return 0;
+  }
+  if(ch==='P'){if(h<22)return 12;if(h<30)return 13;return 1;}
+  if(ch==='B'){if(h<45)return 14;if(h<60)return 15;return 4;}
+  if(ch==='F'){if(h<40)return 17;return 7;}
+  return baseIdx;
+}
+function makeTileset(scene,mapId){
+  const key='tiles-'+mapId;
+  if(scene.textures.exists(key))return key;
+  const map=Core.MAPS[mapId];
+  const cv=document.createElement('canvas');cv.width=32*9;cv.height=32*3;
+  const g=cv.getContext('2d');
+  const base=c=>{g.fillStyle=c;g.fillRect(0,0,32,32);};
+  const at=(i,fn)=>{g.save();g.translate((i%9)*32,Math.floor(i/9)*32);fn();g.restore();};
+  const R=(x,y,w,h,c)=>{g.fillStyle=c;g.fillRect(x,y,w,h);};
+  const speck=(rnd,n)=>{for(let k=0;k<n;k++)R(Math.floor(rnd()*30),Math.floor(rnd()*30),2,2,rnd()<0.5?'rgba(0,0,0,.13)':'rgba(255,255,255,.13)');};
+  const groundBase=rnd=>{base(map.ground);speck(rnd,22);};
+  const seedB=hashStr(mapId);
+  at(0,()=>{groundBase(tileRand(seedB^101));});
+  at(1,()=>{const rnd=tileRand(seedB^202);base(map.path);speck(rnd,16);
+    R(0,0,32,2,'rgba(255,255,255,.16)');R(0,30,32,2,'rgba(0,0,0,.16)');
+    R(6+Math.floor(rnd()*18),4,1,24,'rgba(0,0,0,.10)');});
+  at(2,()=>{ /* コート: 木目フロア */
+    const rnd=tileRand(303);
+    const tones=['#dec084','#d8b878','#e4c88e','#d2b070'];
+    for(let r2=0;r2<4;r2++){
+      R(0,r2*8,32,8,tones[Math.floor(rnd()*tones.length)]);
+      R(0,r2*8,32,1,'rgba(120,84,40,.5)');
+      R(Math.floor(rnd()*22),r2*8+2+Math.floor(rnd()*4),5+Math.floor(rnd()*7),1,'rgba(150,110,60,.35)');
+      R(Math.floor(rnd()*30),r2*8,1,8,'rgba(120,84,40,.45)');
+    }
+    g.strokeStyle='rgba(255,255,255,.4)';g.strokeRect(1,1,30,30);});
+  at(3,()=>{ /* 木の下地: 地面＋幹の落ち影（樹冠は別レイヤーで大きく描く） */
+    groundBase(tileRand(seedB^404));
+    R(6,22,20,8,'rgba(0,0,0,.20)');R(10,24,12,4,'rgba(0,0,0,.16)');});
+  at(4,()=>{ /* 建物の壁: 素壁（窓は装飾レイヤーで付ける） */
+    base('#c3c7d2');
+    for(let y=10;y<32;y+=6)R(0,y,32,1,'rgba(90,100,130,.16)');
+    R(0,28,32,4,'rgba(70,80,110,.20)');
+    R(2,2,1,26,'rgba(255,255,255,.20)');});
+  at(5,()=>{ /* ドア: 枠・パネル・ノブ・段 */
+    base('#c8ccd8');
+    for(let y=10;y<32;y+=6)R(0,y,32,1,'rgba(90,100,130,.18)');
+    R(0,0,32,5,'#8a90a8');
+    R(7,5,18,27,'#5e4632');R(9,7,14,25,'#7a4a2a');
+    R(11,10,10,8,'#6d3f22');R(11,21,10,8,'#6d3f22');
+    R(19,18,2,2,'#ffd76a');
+    R(5,30,22,2,'#8a90a8');});
+  at(6,()=>{ /* 看板: 柱と木の板＋文字の書き込み風 */
+    groundBase(tileRand(seedB^606));
+    R(14,15,4,15,'#6b4a2a');
+    R(4,3,24,14,'#8a6a3a');R(6,5,20,10,'#e8dcc0');
+    R(8,7,16,2,'#7a6a4a');R(8,11,11,2,'#7a6a4a');});
+  at(7,()=>{ /* 花壇: 花と茎 */
+    const rnd=tileRand(seedB^707);groundBase(rnd);
+    const cols=['#e88ab0','#ffffff','#ffd76a','#f2a0c0'];
+    for(let k=0;k<5;k++){
+      const x=3+Math.floor(rnd()*26),y=4+Math.floor(rnd()*24);
+      R(x+1,y+3,1,3,'rgba(0,0,0,.25)');
+      R(x,y,3,3,cols[Math.floor(rnd()*cols.length)]);R(x+1,y+1,1,1,'#fff6c8');
+    }});
+  at(8,()=>{ /* ワープ: 木の板に ⇔ */
+    groundBase(tileRand(seedB^808));
+    R(5,23,3,7,'#5e4632');R(24,23,3,7,'#5e4632');
+    R(3,7,26,16,'#7a4a2a');R(5,9,22,12,'#a87f4f');
+    g.fillStyle='#ffd76a';g.font='bold 13px sans-serif';g.fillText('⇔',9,20);});
+  /* --- バリエーション（第4段階） --- */
+  at(9,()=>{const rnd=tileRand(seedB^909);base(shade(map.ground,1.1));speck(rnd,18);
+    if(mapId==='school'){const cols=['#ffffff','#ffd76a','#f2a0c0'];
+      for(let k=0;k<3;k++){const x=3+Math.floor(rnd()*26),y=3+Math.floor(rnd()*26);R(x,y,2,2,cols[k%3]);}}});
+  at(10,()=>{const rnd=tileRand(seedB^1010);base(shade(map.ground,0.88));speck(rnd,20);});
+  at(11,()=>{const rnd=tileRand(seedB^1111);groundBase(rnd);
+    if(mapId==='school'){const cols=['#e88ab0','#ffffff','#ffd76a'];
+      for(let k=0;k<6;k++){const x=2+Math.floor(rnd()*27),y=2+Math.floor(rnd()*27);R(x+1,y+2,1,2,'rgba(0,0,0,.2)');R(x,y,3,2,cols[Math.floor(rnd()*3)]);}}
+    else{R(6,8,14,2,'rgba(0,0,0,.22)');R(18,20,10,2,'rgba(0,0,0,.18)');R(8,22,2,6,'rgba(0,0,0,.15)');}});
+  at(12,()=>{const rnd=tileRand(seedB^1212);base(map.path);speck(rnd,12);
+    R(0,0,3,32,'rgba(0,0,0,.20)');R(29,0,3,32,'rgba(0,0,0,.20)');
+    R(0,0,3,3,'rgba(255,255,255,.25)');R(29,29,3,3,'rgba(0,0,0,.25)');});
+  at(13,()=>{const rnd=tileRand(seedB^1313);base(shade(map.path,0.92));speck(rnd,18);});
+  at(14,()=>{ /* 壁・窓あり: 枠＋ガラス＋反射 */
+    base('#c3c7d2');
+    for(let y=10;y<32;y+=6)R(0,y,32,1,'rgba(90,100,130,.16)');
+    R(0,28,32,4,'rgba(70,80,110,.20)');
+    R(8,9,16,15,'#54627f');R(9,10,14,13,'#a9d2ee');
+    R(15,10,1,13,'#54627f');R(9,16,14,1,'#54627f');
+    R(10,11,4,5,'rgba(255,255,255,.55)');R(18,18,3,3,'rgba(255,255,255,.3)');});
+  at(15,()=>{ /* 壁・縦目地 */
+    base('#bcc0cc');
+    for(let y=10;y<32;y+=6)R(0,y,32,1,'rgba(90,100,130,.16)');
+    R(15,0,2,32,'rgba(90,100,130,.28)');R(0,28,32,4,'rgba(70,80,110,.22)');
+    R(3,3,2,8,'rgba(255,255,255,.25)');});
+  at(16,()=>{const rnd=tileRand(seedB^1616);groundBase(rnd);
+    R(7,10,18,10,mapId==='school'?'rgba(150,115,70,.35)':'rgba(0,0,0,.16)');
+    R(10,13,10,4,mapId==='school'?'rgba(130,95,55,.3)':'rgba(255,255,255,.10)');});
+  at(17,()=>{ /* 花壇・密 */
+    const rnd=tileRand(seedB^1717);groundBase(rnd);
+    const cols=['#e88ab0','#ffffff','#ffd76a','#f2a0c0','#e0684a'];
+    for(let k=0;k<9;k++){
+      const x=2+Math.floor(rnd()*27),y=3+Math.floor(rnd()*25);
+      R(x+1,y+3,1,3,'rgba(0,0,0,.25)');
+      R(x,y,3,3,cols[Math.floor(rnd()*cols.length)]);R(x+1,y+1,1,1,'#fff6c8');
+    }});
+  scene.textures.addCanvas(key,cv);
+  return key;
+}
+/* ---------- 探索の装飾レイヤー（第4段階） ----------
+   Core の MAPS（タイル文字・当たり判定）は変えず、描画側だけで密度を上げる:
+   ・木: 'T' タイルごとに大きな樹冠スプライト（64×80）を重ねる
+   ・建物: 'B'/'D' の塊ごとに屋根・看板・窓・のれん・ショーウィンドウを重ねる
+   ・小物: ベンチ／自販機／掲示板／フェンス／植木鉢／ボールかごを決定的に配置 */
+function makeTreeTexture(scene,variant){
+  const key='tree-'+variant;
+  if(scene.textures.exists(key))return key;
+  const cv=document.createElement('canvas');cv.width=64;cv.height=80;
+  const g=cv.getContext('2d');
+  const R=(x,y,w,h,c)=>{g.fillStyle=c;g.fillRect(x,y,w,h);};
+  const rnd=tileRand(5000+variant*777);
+  R(22,72,26,5,'rgba(0,0,0,.25)'); /* 落ち影 */
+  R(29,52,6,22,'#6b4a2a');R(31,52,2,22,'#59391f');R(26,58,4,4,'#6b4a2a'); /* 幹・枝 */
+  const greens=[['#2c5c27','#3d7a36','#4f9145','#63a856'],['#27543a','#356b47','#47875a','#5ea06e'],['#3a6428','#4c8034','#609647','#77ad5c']][variant%3];
+  const blobs=[[32,26,30],[16,36,20],[48,36,20],[24,16,20],[42,16,18],[32,40,24],[14,26,14],[50,26,14]];
+  for(const [cx,cy,r] of blobs){R(cx-r/2,cy-r/2,r,r*0.82,greens[0]);}
+  for(const [cx,cy,r] of blobs){R(cx-r/2+3,cy-r/2+2,r-7,r*0.7,greens[1]);}
+  for(const [cx,cy,r] of blobs.slice(0,5)){R(cx-r/4,cy-r/3,r/2,r/3,greens[2]);}
+  for(let k=0;k<10;k++){const x=8+Math.floor(rnd()*48),y=8+Math.floor(rnd()*36);R(x,y,3,3,greens[3]);}
+  if(variant===2){const cols=['#f2a0c0','#e88ab0','#ffffff'];for(let k=0;k<8;k++){const x=10+Math.floor(rnd()*44),y=10+Math.floor(rnd()*32);R(x,y,3,3,cols[k%3]);}} /* 花付き */
+  scene.textures.addCanvas(key,cv);
+  return key;
+}
+function makePropTexture(scene,kind){
+  const key='prop-'+kind;
+  if(scene.textures.exists(key))return key;
+  const cv=document.createElement('canvas');
+  const g=cv.getContext('2d');
+  const R=(x,y,w,h,c)=>{g.fillStyle=c;g.fillRect(x,y,w,h);};
+  if(kind==='bench'){cv.width=46;cv.height=22;
+    R(4,19,38,3,'rgba(0,0,0,.25)');
+    R(3,6,40,4,'#8a6a3a');R(3,12,40,4,'#7a5c30');R(5,2,36,3,'#9a7a46');
+    R(6,10,3,10,'#4a4a55');R(37,10,3,10,'#4a4a55');R(3,6,40,1,'#c0a068');
+  }else if(kind==='vending'){cv.width=26;cv.height=42;
+    R(2,39,22,3,'rgba(0,0,0,.3)');
+    R(1,1,24,40,'#8e2a30');R(2,2,22,38,'#c03a40');R(2,2,22,3,'#e0686a');
+    R(4,7,13,16,'#d8ecf4');R(5,9,3,12,'#e0684a');R(9,9,3,12,'#57d95e');R(13,9,3,12,'#ffd76a');
+    R(19,7,4,10,'#7a2028');R(20,12,2,2,'#ffd76a');
+    R(4,27,18,8,'#5e1f24');R(6,29,14,2,'#10131f');
+    R(4,4,18,2,'#ffffff');
+  }else if(kind==='board'){cv.width=38;cv.height=32;
+    R(4,29,30,3,'rgba(0,0,0,.25)');
+    R(6,10,3,20,'#6b4a2a');R(29,10,3,20,'#6b4a2a');
+    R(2,2,34,20,'#5e4632');R(4,4,30,16,'#e8e0c8');
+    R(7,7,10,6,'#f4f6f8');R(19,7,11,6,'#ffd9a0');R(7,15,16,3,'#cfe8ff');R(25,15,6,3,'#ffb0a0');
+    R(2,2,34,2,'#7a4a2a');
+  }else if(kind==='fence'){cv.width=32;cv.height=14;
+    R(1,4,30,2,'#a8b0bc');R(1,9,30,2,'#98a0ac');
+    for(let x=2;x<32;x+=6)R(x,2,2,11,'#b8c0cc');
+    R(0,12,32,2,'rgba(0,0,0,.18)');
+  }else if(kind==='pot'){cv.width=18;cv.height=16;
+    R(3,13,12,3,'rgba(0,0,0,.25)');
+    R(4,8,10,6,'#a85a3a');R(3,7,12,2,'#c06a44');
+    R(5,2,8,6,'#3d7a36');R(7,0,4,4,'#4f9145');R(6,3,2,2,'#e88ab0');R(11,4,2,2,'#ffd76a');
+  }else{ /* balls: ボールかご */
+    cv.width=28;cv.height=24;
+    R(3,21,22,3,'rgba(0,0,0,.25)');
+    R(5,10,18,11,'rgba(120,130,150,.0)');
+    for(let x=5;x<23;x+=4)R(x,10,1,11,'#8a94a4');
+    R(4,10,20,1,'#aab4c2');R(4,20,20,1,'#aab4c2');
+    const ball=(cx,cy)=>{g.fillStyle='#f4f6f8';g.beginPath();g.arc(cx,cy,5,0,7);g.fill();g.fillStyle='#3a6ad8';g.beginPath();g.arc(cx-1,cy-1,2.2,0,7);g.fill();g.fillStyle='#e04a3a';g.beginPath();g.arc(cx+2,cy+2,1.8,0,7);g.fill();};
+    ball(10,8);ball(18,8);ball(14,13);
+  }
+  scene.textures.addCanvas(key,cv);
+  return key;
+}
+/* 建物の塊（'B'/'D' の連結領域）を矩形の集まりとして抽出する */
+function buildingBlocks(tiles){
+  const H=tiles.length,W=tiles[0].length,seen=new Set(),blocks=[];
+  const isB=(x,y)=>x>=0&&y>=0&&x<W&&y<H&&(tiles[y][x]==='B'||tiles[y][x]==='D');
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    if(!isB(x,y)||seen.has(x+','+y))continue;
+    /* 行方向のランを縦にマージする簡易ブロック化 */
+    let x0=x,x1=x;while(isB(x1+1,y))x1++;
+    let y1=y;let grow=true;
+    while(grow){grow=false;
+      let ok=true;for(let xx=x0;xx<=x1;xx++)if(!isB(xx,y1+1))ok=false;
+      if(ok){y1++;grow=true;}}
+    for(let yy=y;yy<=y1;yy++)for(let xx=x0;xx<=x1;xx++)seen.add(xx+','+yy);
+    blocks.push({x0:x0,x1:x1,y0:y,y1:y1});
+  }
+  return blocks;
+}
+const SHOP_NAMES=['サクマスポーツ','青果 いちば','パン工房 麦','古本屋 あおば','喫茶 あさなぎ','花の店 すみれ','薬局 ひまわり','文具 たんぽぽ'];
+const SHOP_COLORS=[0xb0503c,0x3f7a4a,0xc9862b,0x5e4a8e,0x7a4a2a,0xc25e7a,0x3a6e8e,0x8e6a3a];
+function buildExploreDecor(scene,map,mapId){
+  const tiles=map.tiles,H=tiles.length,W=tiles[0].length;
+  const g=scene.add.graphics().setDepth(44);
+  const occupied=new Set();
+  for(const n of map.npcs)occupied.add(Math.floor(n.x/32)+','+Math.floor(n.y/32));
+  for(const s of (map.spots||[]))occupied.add(s.x+','+s.y);
+  for(const w of (map.warps||[]))occupied.add(w.x+','+w.y);
+  /* --- 木（大きな樹冠を重ねる） --- */
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    if(tiles[y][x]!=='T')continue;
+    const v=hashStr(mapId+'tree:'+x+','+y)%3;
+    scene.add.image(x*32+16,(y+1)*32+2,makeTreeTexture(scene,v))
+      .setOrigin(0.5,1).setDepth((y+1)*32-1);
+  }
+  /* --- 建物: 屋根・影・窓・看板 --- */
+  const blocks=buildingBlocks(tiles);
+  const isStreet=(mapId==='street');
+  for(const b of blocks){
+    const px0=b.x0*32,px1=(b.x1+1)*32,py0=b.y0*32,py1=(b.y1+1)*32;
+    const bw=px1-px0;
+    /* 接地影（建物の南側に落とす） */
+    g.fillStyle(0x000000,0.16);g.fillRect(px0-3,py1-2,bw+6,7);
+    g.fillStyle(0x000000,0.10);g.fillRect(px1-2,py0+6,6,py1-py0);
+    /* 屋根: 本体＋棟＋軒＋破風 */
+    const roofC=isStreet?0x46586e:0xa84a38,roofD=isStreet?0x2e3c50:0x7c3426,roofL=isStreet?0x5f748e:0xc05a44;
+    g.fillStyle(roofD,1);g.fillRect(px0-7,py0-4,bw+14,8);
+    g.fillStyle(roofC,1);g.fillRect(px0-6,py0-15,bw+12,13);
+    g.fillStyle(roofL,1);g.fillRect(px0-6,py0-15,bw+12,4);
+    g.fillStyle(roofD,1);
+    g.fillTriangle(px0-6,py0-2,px0-6,py0-15,px0+8,py0-2);
+    g.fillTriangle(px1+6,py0-2,px1+6,py0-15,px1-8,py0-2);
+    for(let x=px0-2;x<px1+2;x+=10){g.fillStyle(0x000000,0.12);g.fillRect(x,py0-14,1,10);}
+    /* 窓（2段目以下の壁タイルに決定的に付ける。タイル側の窓と重ならないよう hash で間引く） */
+    for(let y=b.y0+1;y<=b.y1;y++)for(let x=b.x0;x<=b.x1;x++){
+      if(tiles[y][x]!=='B')continue;
+      if(hashStr(mapId+'win:'+x+','+y)%100<45)continue; /* タイル窓あり側と重ねない */
+      const wx=x*32,wy=y*32;
+      g.fillStyle(0x54627f,1);g.fillRect(wx+9,wy+9,14,14);
+      g.fillStyle(0xa9d2ee,1);g.fillRect(wx+10,wy+10,12,12);
+      g.fillStyle(0x54627f,1);g.fillRect(wx+15,wy+10,1,12);g.fillRect(wx+10,wy+15,12,1);
+      g.fillStyle(0xffffff,0.5);g.fillRect(wx+11,wy+11,3,4);
+    }
+  }
+  /* --- 校舎の看板（最大の建物ブロックの正面へ） --- */
+  if(!isStreet&&blocks.length){
+    const b=blocks.reduce((a,c)=>(c.x1-c.x0)>(a.x1-a.x0)?c:a,blocks[0]);
+    const cx=(b.x0+b.x1+1)*16,ty=b.y0*32+38;
+    g.fillStyle(0x000000,0.25);g.fillRect(cx-72,ty+3,144,24);
+    g.fillStyle(0xf2ead6,1);g.fillRect(cx-72,ty,144,24);
+    g.lineStyle(2,0x7a6a4a,1);g.strokeRect(cx-72,ty,144,24);
+    scene.add.text(cx,ty+4,'朝 凪 学 園',{fontFamily:FONT,fontSize:'15px',color:'#3a3a4a',fontStyle:'bold'}).setOrigin(0.5,0).setDepth(46);
+  }
+  /* --- 商店街のファサード: 店ごとに看板・のれん・ショーウィンドウ --- */
+  if(isStreet){
+    /* 店舗のドアがある行を、最大ブロック周辺で最も 'D' の多い行として求める */
+    const mainB=blocks.reduce((a,c)=>{
+      const areaA=(a.x1-a.x0+1)*(a.y1-a.y0+1),areaC=(c.x1-c.x0+1)*(c.y1-c.y0+1);
+      return areaC>areaA?c:a;},blocks[0]);
+    let doorRow=mainB?mainB.y1:3,bestDn=-1;
+    if(mainB)for(let y=mainB.y0;y<=Math.min(H-1,mainB.y1+1);y++){
+      let dn=0;for(let x=0;x<W;x++)if(tiles[y][x]==='D')dn++;
+      if(dn>bestDn){bestDn=dn;doorRow=y;}
+    }
+    const doors=[];
+    for(let x=0;x<W;x++){
+      if(tiles[doorRow]&&tiles[doorRow][x]==='D'){
+        let x1=x;while(tiles[doorRow][x1+1]==='D')x1++;
+        doors.push({x0:x,x1:x1});x=x1;
+      }
+    }
+    /* SHOP スポットに最も近い店をサクマスポーツにする */
+    const shopSpot=(map.spots||[]).find(s=>s.id==='SHOP');
+    let sakumaIdx=0,bestD=1e9;
+    doors.forEach((d,i)=>{const cx=(d.x0+d.x1)/2;const dd=shopSpot?Math.abs(cx-shopSpot.x):i;if(dd<bestD){bestD=dd;sakumaIdx=i;}});
+    const names=SHOP_NAMES.slice();
+    if(doors.length){const t=names[0];names[0]=names[sakumaIdx%names.length];names[sakumaIdx%names.length]=t;}
+    doors.forEach((d,i)=>{
+      const spanL=i===0?1:Math.floor((doors[i-1].x1+d.x0)/2)+1;
+      const spanR=i===doors.length-1?W-2:Math.floor((d.x1+doors[i+1].x0)/2);
+      const sx0=spanL*32,sx1=(spanR+1)*32,cx=(d.x0+d.x1+1)*16;
+      const col=SHOP_COLORS[i%SHOP_COLORS.length];
+      /* 看板（1段目の壁に横長） */
+      g.fillStyle(0x000000,0.25);g.fillRect(sx0+6,32+6,(sx1-sx0)-12,22);
+      g.fillStyle(col,1);g.fillRect(sx0+5,32+4,(sx1-sx0)-10,22);
+      g.lineStyle(1,0xffffff,0.5);g.strokeRect(sx0+5,32+4,(sx1-sx0)-10,22);
+      scene.add.text((sx0+sx1)/2,32+9,names[i%names.length],{fontFamily:FONT,fontSize:'12px',color:'#ffffff',fontStyle:'bold'}).setOrigin(0.5,0).setDepth(46);
+      /* のれん（ドア上部） */
+      const dx0=d.x0*32,dx1=(d.x1+1)*32;
+      g.fillStyle(col,0.92);g.fillRect(dx0+1,doorRow*32,dx1-dx0-2,13);
+      g.fillStyle(0xffffff,0.85);
+      for(let x=dx0+8;x<dx1-4;x+=10)g.fillRect(x,doorRow*32,1,13);
+      g.fillStyle(0x000000,0.2);g.fillRect(dx0+1,doorRow*32+13,dx1-dx0-2,2);
+      /* ショーウィンドウ（ドア両脇の壁・最下段） */
+      for(const wx of [d.x0-1,d.x1+1]){
+        if(wx<spanL||wx>spanR||tiles[doorRow][wx]!=='B')continue;
+        const X=wx*32,Y=doorRow*32;
+        g.fillStyle(0x3c4658,1);g.fillRect(X+3,Y+6,26,24);
+        g.fillStyle(0xbfd9ea,1);g.fillRect(X+4,Y+7,24,22);
+        g.fillStyle(0xffffff,0.55);g.fillRect(X+6,Y+9,6,10);
+        g.fillStyle(0xe0684a,0.8);g.fillRect(X+16,Y+20,9,6);
+        g.fillStyle(0x57d95e,0.8);g.fillRect(X+7,Y+22,7,4);
+      }
+      /* 植木鉢（ドア脇） */
+      if(!occupied.has(d.x0-1+','+doorRow)&&tiles[doorRow][d.x0-1]==='B'){}
+      const potX=(d.x1+1)*32+2;
+      scene.add.image(potX,doorRow*32+30,makePropTexture(scene,'pot')).setOrigin(0,1).setDepth(doorRow*32+30);
+    });
+  }
+  /* --- 小物（決定的配置。NPC／スポット／ワープと重なる場合は置かない） --- */
+  const PROPS={
+    school:[['bench',5,6],['bench',30,16],['vending',13,4],['board',24,4],['balls',17,9],
+            ['fence',20,15],['fence',21,15],['pot',14,4],['pot',32,4]],
+    street:[['vending',36,4],['bench',5,6],['bench',30,9],['board',20,5],['balls',14,10],
+            ['bench',22,19],['pot',5,4],['pot',18,4],['fence',18,14],['fence',19,14],['fence',20,14]],
+  };
+  for(const [kind,tx,ty] of (PROPS[mapId]||[])){
+    if(occupied.has(tx+','+ty))continue;
+    const ch=tiles[ty]&&tiles[ty][tx];
+    if(ch==='T'||ch==='B'||ch==='D'||ch==='S'||ch==='C'||ch==='W')continue;
+    const tex=makePropTexture(scene,kind);
+    const tw=scene.textures.get(tex).getSourceImage().width;
+    scene.add.image(tx*32+16,ty*32+31,tex).setOrigin(0.5,1).setDepth((ty+1)*32-2);
+    occupied.add(tx+','+ty);
+  }
+}
+/* キャラチップ（第4段階）: 48×64 のドット絵スプライト。
+   4方向（下／左／右／上）×3コマ（静止・歩行1・歩行2）を 144×256 のシートに生成する。
+   2段シェーディング（ハイライト／影／輪郭線）で密度を上げる。
+   髪型6種と肌色は seed（名前）から決定的に割り当てる。右向きは左向きを反転して作る。
+   試合用アクションポーズ（スパイク／レシーブ／トス／ブロック）は別テクスチャで生成する */
+function drawCharaPx(g,x,y,w,h,c){g.fillStyle=c;g.fillRect(x,y,w,h);}
+/* 色調セット: base（そのまま）/ lt 明 / dk 影 / dp 濃影 / ln 輪郭 */
+function tones(hex){
+  return {base:hex,lt:shade(hex,1.14),dk:shade(hex,0.8),dp:shade(hex,0.6),ln:shade(hex,0.4)};
+}
+const CHARA_PARAMS=new Map(); /* charaKey -> {hair,uni,skin,style}（ポーズ生成用） */
+function drawHair(R,T,dir,style){
+  const hair=T.base,hd=T.dk;
+  if(dir==='u'){
+    R(13,4,22,20,T.base);R(13,4,22,3,T.lt);R(13,21,22,3,hd);
+    if(style===1){R(15,0,4,5,T.base);R(22,0,4,6,T.base);R(29,1,4,5,T.base);}
+    if(style===2){R(11,8,4,26,T.dk);R(33,8,4,26,T.dk);}
+    if(style===3){R(21,22,6,16,T.base);R(20,21,8,3,'#e0684a');}
+    if(style===5)R(16,3,16,3,T.dk);
+    return;
+  }
+  if(dir==='l'){
+    R(16,4,17,8,T.base);R(16,4,17,2,T.lt);R(16,11,17,2,hd);R(30,10,4,8,T.base);
+    if(style===1){R(17,0,4,4,T.base);R(23,0,4,5,T.base);R(29,1,3,4,T.base);}
+    if(style===2)R(14,8,5,26,T.dk);
+    if(style===3){R(12,9,6,20,T.base);R(13,7,5,3,'#e0684a');}
+    if(style===4)R(30,10,4,14,T.base);
+    if(style===5)R(17,5,15,3,T.base);
+    return;
+  }
+  switch(style){
+    case 1: R(14,6,20,6,T.base);R(15,1,4,5,T.base);R(21,0,4,6,T.base);R(27,1,4,5,T.base);R(32,3,3,4,T.base);R(14,10,20,2,hd);break;
+    case 2: R(13,4,22,8,T.base);R(13,4,22,2,T.lt);R(11,10,5,30,T.base);R(32,10,5,30,T.base);R(11,10,5,3,hd);R(32,10,5,3,hd);R(13,11,22,2,hd);break;
+    case 3: R(14,4,20,7,T.base);R(14,4,20,2,T.lt);R(14,10,3,5,T.base);R(31,10,3,5,T.base);R(34,7,6,20,T.base);R(33,5,5,3,'#e0684a');R(14,10,20,1,hd);break;
+    case 4: R(12,4,24,8,T.base);R(12,4,24,2,T.lt);R(12,11,5,15,T.base);R(31,11,5,15,T.base);R(12,11,24,2,hd);break;
+    case 5: R(15,5,18,6,T.base);R(21,2,6,3,T.base);R(15,10,18,1,hd);break;
+    default: R(14,4,20,7,T.base);R(14,4,20,2,T.lt);R(14,10,3,6,T.base);R(31,10,3,6,T.base);R(14,10,20,1,hd);
+  }
+}
+function drawChara(g,ox,oy,dir,frame,o){
+  const H=tones(o.hair),U=tones(o.uni),S=tones(o.skin),SH=tones(shade(o.uni,0.55));
+  const style=o.style,shoe='#2e2c38',shoeL='#e8e8ee';
+  const R=(x,y,w,h,c)=>drawCharaPx(g,ox+x,oy+y,w,h,c);
+  R(9,60,30,4,'rgba(0,0,0,.28)'); /* 接地影 */
+  if(dir==='d'&&style===2)R(12,8,24,28,H.dk); /* ロングヘア背面 */
+  if(dir==='l'){
+    /* ---- 横向き（プロフィール） ---- */
+    if(frame===0){R(21,50,5,8,S.dk);R(28,50,5,8,S.base);R(19,58,9,4,shoe);R(27,58,9,4,shoe);R(19,61,9,1,shoeL);R(27,61,9,1,shoeL);}
+    else if(frame===1){R(17,49,5,8,S.base);R(15,57,9,4,shoe);R(15,60,9,1,shoeL);R(29,48,5,7,S.dk);R(29,55,9,4,shoe);R(29,58,9,1,shoeL);}
+    else{R(29,49,5,8,S.base);R(27,57,9,4,shoe);R(27,60,9,1,shoeL);R(17,48,5,7,S.dk);R(15,55,9,4,shoe);R(15,58,9,1,shoeL);}
+    R(15,43,19,8,SH.ln);R(16,44,17,6,SH.base);R(24,44,2,6,SH.dp);R(16,44,17,1,SH.lt);
+    const sw=frame===1?-1:frame===2?1:0;
+    R(27,29,5,7,U.dk);R(28+sw,36,4,8,S.base); /* 前腕 */
+    R(13,29,4,6,U.dp);R(12,35-sw,3,7,S.dk); /* 後腕 */
+    R(15,28,19,17,U.ln);R(16,29,17,15,U.base);R(16,29,3,15,U.lt);R(29,29,4,15,U.dk);
+    R(16,34,17,2,'rgba(255,255,255,.8)');R(21,29,6,3,U.dp);
+    if(dir==='l'&&style===2)R(13,10,5,24,H.dk);
+    R(16,9,17,18,S.dp);R(17,10,15,16,S.base);R(17,10,15,2,S.lt);R(32,18,2,3,S.base); /* 頭・鼻 */
+    R(26,18,3,4,'#22222c');R(26,18,1,1,'#ffffff');R(24,23,3,1,'#b06a4a');
+    drawHair(R,H,dir,style);
+    return;
+  }
+  /* ---- 脚・靴 ---- */
+  if(frame===0){R(16,51,5,7,S.base);R(27,51,5,7,S.base);R(15,58,8,4,shoe);R(26,58,8,4,shoe);R(15,61,8,1,shoeL);R(26,61,8,1,shoeL);}
+  else if(frame===1){R(16,50,5,8,S.base);R(15,58,8,4,shoe);R(15,61,8,1,shoeL);R(27,49,5,6,S.dk);R(26,55,8,4,shoe);R(26,58,8,1,shoeL);}
+  else{R(27,50,5,8,S.base);R(26,58,8,4,shoe);R(26,61,8,1,shoeL);R(16,49,5,6,S.dk);R(15,55,8,4,shoe);R(15,58,8,1,shoeL);}
+  /* ---- 短パン ---- */
+  R(12,43,24,9,SH.ln);R(13,44,22,7,SH.base);R(13,44,22,1,SH.lt);R(23,44,2,7,SH.dp);R(13,49,22,2,SH.dk);
+  /* ---- 腕（歩行で脚と逆に振る） ---- */
+  const aL=frame===1?-1:frame===2?1:0,aR=-aL;
+  if(dir==='u'){R(9,29,5,7,U.dk);R(34,29,5,7,U.dk);R(9,36+aL,4,8,S.base);R(35,36+aR,4,8,S.base);}
+  else{R(8,29,5,7,U.dk);R(35,29,5,7,U.dk);R(8,36+aL,4,8,S.base);R(36,36+aR,4,8,S.base);R(8,36+aL,4,2,S.lt);R(36,36+aR,4,2,S.lt);}
+  /* ---- 胴体（ジャージ: 襟・胸ライン・陰影） ---- */
+  R(11,27,26,18,U.ln);R(12,28,24,16,U.base);R(12,28,4,16,U.lt);R(31,28,5,16,U.dk);R(12,42,24,2,U.dk);
+  R(12,34,24,2,'rgba(255,255,255,.8)');R(20,28,8,3,U.dp);
+  if(dir==='u'){R(18,31,12,10,'rgba(255,255,255,.9)');R(22,32,4,8,U.dp);}
+  /* ---- 頭・顔 ---- */
+  if(dir==='u'){
+    R(14,8,20,19,H.dp);R(15,9,18,17,H.base);
+  }else{
+    R(21,25,6,4,S.dk); /* 首 */
+    R(14,8,20,19,S.dp);R(15,9,18,17,S.base);R(15,9,18,2,S.lt);
+    R(13,16,2,5,S.base);R(33,16,2,5,S.base);
+    R(19,15,4,1,H.dk);R(26,15,4,1,H.dk); /* 眉 */
+    R(19,17,3,4,'#22222c');R(26,17,3,4,'#22222c');R(19,17,1,1,'#fff');R(26,17,1,1,'#fff'); /* 目 */
+    R(23,21,2,2,S.dk);R(22,24,4,1,'#b06a4a'); /* 鼻・口 */
+    R(16,20,3,2,'rgba(240,130,130,.35)');R(29,20,3,2,'rgba(240,130,130,.35)'); /* 頬 */
+  }
+  drawHair(R,H,dir,style);
+}
+function makeCharaTexture(scene,hair,uni,seed,forceStyle){
+  seed=String((seed===undefined||seed===null||seed==='')?(hair+'_'+uni):seed);
+  const hs=hashStr(seed);
+  const style=(forceStyle===undefined||forceStyle===null)?hs%6:forceStyle;
+  const skin=SKIN_TONES[(hs>>>3)%SKIN_TONES.length];
+  const key='chara_'+hashStr(hair+'|'+uni+'|'+seed+'|'+style).toString(36);
+  CHARA_PARAMS.set(key,{hair:hair,uni:uni,skin:skin,style:style});
+  if(scene.textures.exists(key)){
+    if(!scene.anims.exists(key+'-walk-d'))makeCharaAnim(scene,key);
+    return key;
+  }
+  const o={hair:hair,uni:uni,skin:skin,style:style};
+  const cv=document.createElement('canvas');cv.width=144;cv.height=256;
+  const g=cv.getContext('2d');
+  for(let f=0;f<3;f++){
+    drawChara(g,f*48,0,'d',f,o);
+    drawChara(g,f*48,192,'u',f,o);
+  }
+  const tc=document.createElement('canvas');tc.width=144;tc.height=64;
+  const tg=tc.getContext('2d');
+  for(let f=0;f<3;f++)drawChara(tg,f*48,0,'l',f,o);
+  g.drawImage(tc,0,64);
+  for(let f=0;f<3;f++){ /* 右向きは左向きをコマごとに反転 */
+    g.save();g.translate((f+1)*48,128);g.scale(-1,1);
+    g.drawImage(tc,f*48,0,48,64,0,0,48,64);
+    g.restore();
+  }
+  scene.textures.addCanvas(key,cv);
+  const tex=scene.textures.get(key);
+  const rows={d:0,l:64,r:128,u:192};
+  for(const d in rows)for(let f=0;f<3;f++)tex.add(d+f,0,f*48,rows[d],48,64);
+  makeCharaAnim(scene,key);
+  return key;
+}
+function makeCharaAnim(scene,key){
+  for(const d of ['d','l','r','u']){
+    const ak=key+'-walk-'+d;
+    if(scene.anims.exists(ak))continue;
+    scene.anims.create({key:ak,
+      frames:[{key:key,frame:d+'1'},{key:key,frame:d+'0'},{key:key,frame:d+'2'},{key:key,frame:d+'0'}],
+      frameRate:8,repeat:-1});
+  }
+}
+/* ---------- 試合用アクションポーズ（48×64・右向き＝ネット向きで生成し、左向きは反転） ---------- */
+function drawPose(g,pose,o){
+  const H=tones(o.hair),U=tones(o.uni),S=tones(o.skin),SH=tones(shade(o.uni,0.55));
+  const shoe='#2e2c38',shoeL='#e8e8ee';
+  const R=(x,y,w,h,c)=>drawCharaPx(g,x,y,w,h,c);
+  const head=(hx,hy,up)=>{
+    R(hx,hy,17,18,S.dp);R(hx+1,hy+1,15,16,S.base);R(hx+1,hy+1,15,2,S.lt);
+    R(hx+16,hy+9,2,3,S.base);
+    R(hx+10,hy+8,3,4,'#22222c');R(hx+10,hy+8,1,1,'#fff');
+    R(hx+9,hy+13,3,1,'#b06a4a');
+    R(hx-1,hy-3,19,7,H.base);R(hx-1,hy-3,19,2,H.lt);R(hx-1,hy+3,19,1,H.dk);
+    if(o.style===1){R(hx+2,hy-7,4,4,H.base);R(hx+9,hy-8,4,5,H.base);R(hx+15,hy-6,3,4,H.base);}
+    if(o.style===2)R(hx-3,hy+2,5,24,H.dk);
+    if(o.style===3){R(hx-6,hy,6,18,H.base);R(hx-5,hy-2,5,3,'#e0684a');}
+    if(o.style===4)R(hx-1,hy+3,3,12,H.base);
+    if(up)R(hx+4,hy+16,9,2,S.dk);
+  };
+  if(pose==='spike'){
+    R(12,58,26,3,'rgba(0,0,0,.18)'); /* 小さめの影（滞空） */
+    /* 脚: 前脚は伸ばし、後脚は曲げて後ろへ */
+    R(24,40,5,9,S.base);R(25,49,8,4,shoe);R(25,52,8,1,shoeL);
+    R(14,38,8,4,S.dk);R(11,33,4,7,S.dk);R(8,38,8,4,shoe);R(8,41,8,1,shoeL);
+    R(14,34,17,8,SH.ln);R(15,35,15,6,SH.base);R(15,35,15,1,SH.lt);
+    /* 胴体: 反らし気味 */
+    R(15,20,17,16,U.ln);R(16,21,15,14,U.base);R(16,21,3,14,U.lt);R(28,21,3,14,U.dk);
+    R(16,27,15,2,'rgba(255,255,255,.8)');R(21,21,6,3,U.dp);
+    /* 打ち腕: 頭上後方へ引く（上腕→前腕） */
+    R(27,12,5,9,U.dk);R(30,4,4,9,S.base);R(29,2,6,4,S.base);
+    /* バランス腕: 前下へ */
+    R(12,24,4,7,U.dp);R(8,30,4,8,S.dk);
+    head(14,4,false);
+  }else if(pose==='block'){
+    R(14,59,22,3,'rgba(0,0,0,.18)');
+    /* 脚: まっすぐ下へ揃える */
+    R(19,44,5,12,S.base);R(26,44,5,12,S.base);R(17,56,8,4,shoe);R(25,56,8,4,shoe);R(17,59,8,1,shoeL);R(25,59,8,1,shoeL);
+    R(16,36,18,9,SH.ln);R(17,37,16,7,SH.base);R(17,37,16,1,SH.lt);R(24,37,2,7,SH.dp);
+    /* 胴体: 伸び上がる */
+    R(16,22,18,15,U.ln);R(17,23,16,13,U.base);R(17,23,3,13,U.lt);R(30,23,3,13,U.dk);
+    R(17,28,16,2,'rgba(255,255,255,.8)');R(22,23,6,3,U.dp);
+    /* 両腕: まっすぐ上へ（手は頭上） */
+    R(17,8,5,15,U.dk);R(26,8,5,15,U.dk);
+    R(17,0,5,9,S.base);R(26,0,5,9,S.base);R(16,0,1,8,S.dk);R(31,0,1,8,S.dk);
+    head(17,10,false);
+    /* 頭と腕が重なる分、顔を腕の内側にずらす */
+  }else if(pose==='toss'){
+    R(10,60,28,4,'rgba(0,0,0,.28)');
+    /* 脚: つま先立ち */
+    R(18,48,5,9,S.base);R(27,48,5,9,S.base);R(16,57,8,4,shoe);R(26,57,8,4,shoe);R(16,60,8,1,shoeL);R(26,60,8,1,shoeL);
+    R(15,40,19,9,SH.ln);R(16,41,17,7,SH.base);R(16,41,17,1,SH.lt);R(24,41,2,7,SH.dp);
+    /* 胴体 */
+    R(15,26,19,15,U.ln);R(16,27,17,13,U.base);R(16,27,3,13,U.lt);R(30,27,3,13,U.dk);
+    R(16,32,17,2,'rgba(255,255,255,.8)');R(21,27,7,3,U.dp);
+    /* 両腕: 頭上へ広げてトス */
+    R(12,14,5,13,U.dk);R(31,14,5,13,U.dk);
+    R(10,4,5,11,S.base);R(33,4,5,11,S.base);
+    R(9,2,3,4,S.base);R(14,2,3,4,S.base);R(32,2,3,4,S.base);R(37,2,3,4,S.base); /* 指 */
+    head(16,10,true);
+  }else{ /* receive: 低姿勢で両腕を前下に揃える（プラットフォーム） */
+    R(8,60,32,4,'rgba(0,0,0,.3)');
+    /* 脚: 深く曲げて広く */
+    R(13,44,6,9,S.base);R(10,53,10,4,shoe);R(10,56,10,1,shoeL);
+    R(28,44,6,9,S.dk);R(29,53,10,4,shoe);R(29,56,10,1,shoeL);
+    R(12,38,24,9,SH.ln);R(13,39,22,7,SH.base);R(13,39,22,1,SH.lt);R(24,39,2,7,SH.dp);
+    /* 胴体: 前傾 */
+    R(13,24,22,15,U.ln);R(14,25,20,13,U.base);R(14,25,4,13,U.lt);R(30,25,4,13,U.dk);
+    R(14,30,20,2,'rgba(255,255,255,.8)');R(20,25,7,3,U.dp);
+    /* 両腕: 前下へまっすぐ揃える */
+    R(30,32,5,6,U.dk);R(33,37,4,10,S.base);R(36,45,6,3,S.base);
+    R(26,33,4,5,U.dp);R(29,38,3,8,S.dk);
+    head(15,7,false);
+  }
+}
+function makePoseTexture(scene,baseKey,pose){
+  const key=baseKey+'-pose-'+pose;
+  if(scene.textures.exists(key))return key;
+  const o=CHARA_PARAMS.get(baseKey);
+  if(!o)return baseKey;
+  const cv=document.createElement('canvas');cv.width=48;cv.height=64;
+  drawPose(cv.getContext('2d'),pose,o);
+  scene.textures.addCanvas(key,cv);
+  return key;
+}
+/* カットイン用の顔ドット絵（96×96）: 歩行チップと同じ髪型・肌色で描く（イラストが無い場合のフォールバック） */
+function makeFaceTexture(scene,hair,uni,seed){
+  seed=String((seed===undefined||seed===null||seed==='')?(hair+'_'+uni):seed);
+  const hs=hashStr(seed);
+  const style=hs%6,skin=SKIN_TONES[(hs>>>3)%SKIN_TONES.length];
+  const key='face_'+hashStr(seed+'|'+hair+'|'+uni).toString(36);
+  if(scene.textures.exists(key))return key;
+  const cv=document.createElement('canvas');cv.width=96;cv.height=96;
+  const g=cv.getContext('2d');
+  const R=(x,y,w,h,c)=>{g.fillStyle=c;g.fillRect(x,y,w,h);};
+  const hd=shade(hair,0.78);
+  if(style===2)R(18,8,60,64,shade(hair,0.85)); /* ロング背面 */
+  R(16,76,64,20,uni);R(16,82,64,3,'rgba(255,255,255,.75)');R(40,76,16,4,shade(uni,0.58)); /* 肩・ジャージ */
+  R(42,64,12,12,shade(skin,0.92)); /* 首 */
+  R(26,18,44,48,skin);R(23,38,3,9,skin);R(70,38,3,9,skin); /* 頭・耳 */
+  R(35,33,7,2,hd);R(54,33,7,2,hd); /* 眉 */
+  R(36,40,5,7,'#22222c');R(55,40,5,7,'#22222c'); /* 目 */
+  R(37,41,2,2,'#ffffff');R(56,41,2,2,'#ffffff');
+  R(47,48,2,5,shade(skin,0.85)); /* 鼻 */
+  R(43,57,10,2,'#a85a40'); /* 口 */
+  R(30,50,7,3,'rgba(240,130,130,.4)');R(59,50,7,3,'rgba(240,130,130,.4)'); /* 頬 */
+  switch(style){
+    case 1: R(24,10,48,11,hair);R(27,2,7,8,hair);R(38,0,7,10,hair);R(49,2,7,8,hair);R(59,4,6,6,hair);break;
+    case 2: R(24,8,48,13,hair);R(19,20,7,46,hair);R(70,20,7,46,hair);R(24,19,48,2,hd);break;
+    case 3: R(24,8,48,12,hair);R(24,18,4,10,hair);R(68,18,4,10,hair);R(74,14,10,42,hair);R(71,12,6,4,'#e0684a');break;
+    case 4: R(22,8,52,12,hair);R(22,18,6,28,hair);R(68,18,6,28,hair);break;
+    case 5: R(27,12,42,7,hair);R(42,8,12,4,hair);break;
+    default: R(24,8,48,12,hair);R(24,18,4,12,hair);R(68,18,4,12,hair);R(24,18,48,2,hd);
+  }
+  scene.textures.addCanvas(key,cv);
+  return key;
+}
+function makeBallTexture(scene){
+  if(scene.textures.exists('ball'))return 'ball';
+  const cv=document.createElement('canvas');cv.width=16;cv.height=16;
+  const g=cv.getContext('2d');
+  g.fillStyle='#f4f6f8';g.beginPath();g.arc(8,8,7.5,0,7);g.fill();
+  g.fillStyle='#3a6ad8';g.beginPath();g.arc(5.5,5.5,3.2,0,7);g.fill();
+  g.fillStyle='#e04a3a';g.beginPath();g.arc(11.5,10.5,2.6,0,7);g.fill();
+  g.strokeStyle='rgba(40,50,80,.45)';g.beginPath();g.arc(8,8,7.5,0,7);g.stroke();
+  scene.textures.addCanvas('ball',cv);
+  return 'ball';
+}
+/* 試合コートの木目フロア（600×360）: 板の色むら・木目・継ぎ目・つや */
+function makeCourtTexture(scene){
+  if(scene.textures.exists('court-floor'))return 'court-floor';
+  const cv=document.createElement('canvas');cv.width=600;cv.height=360;
+  const g=cv.getContext('2d');
+  const rnd=tileRand(4242);
+  const tones=['#dcbd85','#e2c48c','#d6b57c','#e6c893','#dabf88'];
+  const rowH=15;
+  for(let y=0;y<360;y+=rowH){
+    g.fillStyle=tones[Math.floor(rnd()*tones.length)];g.fillRect(0,y,600,rowH);
+    for(let k=0;k<7;k++){
+      g.fillStyle='rgba(150,110,60,.25)';
+      g.fillRect(Math.floor(rnd()*540),y+2+Math.floor(rnd()*(rowH-4)),20+Math.floor(rnd()*50),1);
+    }
+    g.fillStyle='rgba(120,84,40,.55)';g.fillRect(0,y,600,1);
+    const jx=Math.floor(rnd()*300);
+    g.fillRect(jx,y,1,rowH);g.fillRect((jx+300)%600,y,1,rowH);
+  }
+  const gr=g.createLinearGradient(0,0,0,360);
+  gr.addColorStop(0,'rgba(255,255,255,.10)');gr.addColorStop(0.5,'rgba(255,255,255,0)');gr.addColorStop(1,'rgba(120,80,30,.10)');
+  g.fillStyle=gr;g.fillRect(0,0,600,360);
+  scene.textures.addCanvas('court-floor',cv);
+  return 'court-floor';
+}
+/* ネット（12×380）: 白帯とメッシュ */
+function makeNetTexture(scene){
+  if(scene.textures.exists('net'))return 'net';
+  const cv=document.createElement('canvas');cv.width=12;cv.height=380;
+  const g=cv.getContext('2d');
+  g.fillStyle='rgba(255,255,255,.5)';
+  for(let x=0;x<=12;x+=4)g.fillRect(x,10,1,362);
+  for(let y=10;y<=372;y+=4)g.fillRect(0,y,12,1);
+  g.fillStyle='#f2f4f6';g.fillRect(0,0,12,10);
+  g.fillStyle='rgba(242,244,246,.85)';g.fillRect(0,372,12,4);
+  scene.textures.addCanvas('net',cv);
+  return 'net';
+}
+
+/* ---------- 入力ブリッジ: Phaser の入力を Core の入力モデルへ流す ---------- */
+class CoreInput{
+  constructor(scene){
+    this.pressQ=[];this.clickQ=[];this.held={};
+    const kb=scene.input.keyboard;
+    if(kb){
+      kb.addCapture(['UP','DOWN','LEFT','RIGHT','SPACE','W','A','S','D','Z','X','L','F','ENTER','ESC','PAGEUP','PAGEDOWN']);
+      kb.on('keydown',e=>{this.held[e.key]=true;if(!e.repeat)this.pressQ.push(e.key);});
+      kb.on('keyup',e=>{this.held[e.key]=false;});
+    }
+    scene.input.on('pointerdown',p=>{this.clickQ.push({x:p.x,y:p.y});});
+  }
+  /* 押下エッジとクリックを Core に渡す（保持キーは __hold で毎回同期する）。
+     Core 側のステップ関数が pressed／mouseClick を消費・クリアする */
+  feed(){
+    Core.__hold(this.held);
+    for(const k of this.pressQ)Core.__press(k);
+    this.pressQ.length=0;
+    if(this.clickQ.length){
+      const c=this.clickQ[this.clickQ.length-1];
+      Core.__click(c.x,c.y);this.clickQ.length=0;
+    }
+  }
+  /* プログラムからキー押下を注入する（動作確認用） */
+  press(k){this.pressQ.push(k);}
+  click(x,y){this.clickQ.push({x:x,y:y});}
+}
+
+/* ---------- 描画ヘルパー: 矩形＋テキストの「オプ」を毎フレーム適用する ---------- */
+class OpView{
+  constructor(scene,depth,poolSize){
+    this.g=scene.add.graphics().setDepth(depth).setScrollFactor(0);
+    this.pool=[];
+    const n=poolSize||110;
+    for(let i=0;i<n;i++){
+      this.pool.push(scene.add.text(0,0,'',{fontFamily:FONT,fontSize:'15px',color:'#ffffff'}).setDepth(depth+1).setVisible(false).setScrollFactor(0));
+    }
+    this.used=0;
+  }
+  begin(){this.g.clear();this.used=0;}
+  rect(x,y,w,h,fill,alpha){
+    this.g.fillStyle(fill,alpha===undefined?1:alpha);this.g.fillRect(x,y,w,h);
+  }
+  stroke(x,y,w,h,color,lw){
+    this.g.lineStyle(lw||2,color,1);this.g.strokeRect(x,y,w,h);
+  }
+  text(x,y,s,size,color,opt){
+    if(this.used>=this.pool.length)return;
+    const t=this.pool[this.used++];
+    opt=opt||{};
+    t.setVisible(true);
+    t.setPosition(x,y);
+    t.setFontSize(size||15);
+    t.setColor(color||'#ffffff');
+    t.setFontStyle(opt.bold?'bold':'');
+    t.setOrigin(opt.ox||0,opt.oy||0);
+    t.setLineSpacing(opt.ls||0);
+    t.setText(s===undefined||s===null?'':String(s));
+  }
+  end(){
+    for(let i=this.used;i<this.pool.length;i++)this.pool[i].setVisible(false);
+  }
+}
+/* Canvas の fillText（ベースライン指定）を Phaser（左上原点）に寄せるための補正 */
+const TY=(y,size)=>y-(size||15)+3;
+
+/* ---------- Core の会話（dlg）を描く ---------- */
+function viewDialog(v){
+  const C=Core,dlg=C.dlg;
+  if(!dlg||dlg.choices||!dlg.lines||!dlg.lines.length)return;
+  const L=dlg.lines[Math.min(dlg.i,dlg.lines.length-1)];
+  v.rect(30,428,900,96,0x080c1c,0.94);v.stroke(30,428,900,96,0x8fb7ff,2);
+  v.stroke(34,432,892,88,0x2a4a7a,1);
+  if(L.name){v.rect(46,436,150,26,0x1d3a5f,1);v.text(54,TY(458,17),L.name,17,'#ffd76a',{bold:true});}
+  v.text(52,464,wrapJa(L.text||'',850,'18px sans-serif'),18,'#ffffff',{ls:6});
+  v.text(920,TY(514,12),'▼',12,'#99aabb');
+}
+/* ---------- Core のメニュー（menu）を描く ---------- */
+function viewMenu(v){
+  const C=Core,menu=C.menu;
+  if(!menu)return;
+  const ROW=34,maxRows=12;
+  const vis=Math.min(menu.items.length,maxRows);
+  let top=0;
+  if(menu.sel>=vis)top=Math.min(menu.sel-vis+1,menu.items.length-vis);
+  const h=vis*ROW+10;
+  v.rect(menu.x,menu.y,menu.w,h,0x0a1022,0.92);v.stroke(menu.x,menu.y,menu.w,h,0x8fb7ff,2);
+  for(let r=0;r<vis;r++){
+    const i=top+r,it=menu.items[i];if(!it)continue;
+    const iy=menu.y+5+r*ROW;
+    if(i===menu.sel){v.rect(menu.x+4,iy,menu.w-8,30,0x33507e,1);v.rect(menu.x+4,iy,3,30,0xffd76a,1);}
+    v.text(menu.x+10,iy+5,(i===menu.sel?'▶ ':'　')+it.label,17,it.disabled?'#666677':'#ffffff');
+    if(it.sub)v.text(menu.x+menu.w-10,iy+8,it.sub,12,'#99aabb',{ox:1});
+  }
+  if(menu.items.length>vis)v.text(menu.x+menu.w-6,menu.y+h-14,'▲▼ '+(menu.sel+1)+'/'+menu.items.length,11,'#99aabb',{ox:1});
+}
+/* ---------- Core のプロフィール（profileOpen）を描く ---------- */
+function viewProfile(v){
+  const C=Core;
+  if(!C.profileOpen)return;
+  const list=C.libPlayers();
+  if(C.profileSel>=list.length){/* Core 側でも 0 に戻すが表示は先頭で守る */}
+  const sel=clamp(C.profileSel,0,Math.max(0,list.length-1));
+  v.rect(60,40,840,460,0x060a18,0.95);v.stroke(60,40,840,460,0x8fb7ff,2);
+  v.text(84,TY(76,20),'選手プロフィール（所持選手 '+list.length+'人）',20,'#ffd76a',{bold:true});
+  const ROWS=C.PROF_ROWS;
+  const top=Math.min(Math.floor(sel/ROWS)*ROWS,Math.max(0,list.length-ROWS));
+  list.slice(top,top+ROWS).forEach((p,i)=>{
+    const idx=top+i,y=104+i*30;
+    if(idx===sel)v.rect(76,y-18,300,26,0x33507e,1);
+    v.text(84,TY(y,16),(idx===sel?'▶':'　')+p.name+'（'+p.pos+'/'+p.elem+'）Lv'+C.progOf(p.name).lv,16,'#ffffff');
+  });
+  if(list.length>ROWS)v.text(84,TY(478,12),'（'+(top+1)+'〜'+Math.min(top+ROWS,list.length)+'人目／全'+list.length+'人）',12,'#99aabb');
+  const base=list[sel];if(!base)return;
+  const p=C.effPlayer(base),pr=C.progOf(base.name);
+  v.text(420,TY(116,19),p.name+'（'+(C.SCHOOL_OF[p.name]||'')+'）',19,'#ffffff',{bold:true});
+  v.text(420,TY(142,15),'ポジション '+p.pos+'　属性 '+p.elem+'　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=C.LV_MAX?'MAX':C.expNeed(pr.lv)),15,'#99aabb');
+  v.text(420,TY(164,15),'FP '+p.maxFP+'　TP '+p.maxTP+'（TP最大値はLv連動）',15,'#99aabb');
+  C.STAT_NAMES.forEach((lb,i)=>{
+    const x=420+(i%4)*118,y=192+Math.floor(i/4)*30;
+    const bonus=p.st[i]-base.st[i];
+    v.text(x,TY(y,15),lb+' '+p.st[i]+(bonus>0?' (+'+bonus+')':''),15,'#ccffee');
+    v.rect(x,y+4,Math.min(90,p.st[i]),5,0x33507e,1);
+  });
+  v.text(420,TY(252,13),'装備：シューズ '+C.equipSlotShort(base.name,'shoes')+'／ユニフォーム '+C.equipSlotShort(base.name,'uniform')+'／サポーター '+C.equipSlotShort(base.name,'sup'),13,'#ccffee');
+  v.text(420,TY(276,15),'必殺技（習得状況）',15,'#ffd76a');
+  const table=C.LEARN[base.name];
+  if(table){
+    table.forEach((t,i)=>{
+      const y=300+i*22;
+      const learned=t.unlock===0||(t.unlock>0&&pr.lv>=t.unlock)||(t.unlock===-1&&C.traditionReady(base.name));
+      const st=t.unlock===0?'習得済み':t.unlock>0?(learned?'習得済み':'Lv'+t.unlock+'で開放'):(learned?'習得済み':'イベントで習得'+(t.cond?'（'+t.cond+'）':''));
+      v.text(436,TY(y,14),'・'+t.name+'（'+t.rank+'／TP'+t.tp+'）　'+st,14,learned?'#ffffff':'#777788');
+    });
+  }else{
+    base.techs.forEach((t,i)=>{
+      v.text(436,TY(300+i*22,14),'・'+t.name+'（'+t.rank+'／TP'+t.tp+'）　習得済み',14,'#ffffff');
+    });
+  }
+  v.text(420,TY(412,15),'紹介',15,'#eef');
+  v.text(436,420,wrapJa(p.intro||'',420,'15px sans-serif'),15,'#ffffff',{ls:7});
+  v.text(420,TY(486,12),'↑↓で選択　Xで閉じる',12,'#99aabb');
+}
+/* ---------- Core の選手ライブラリ（lib）を描く ---------- */
+function viewLibrary(v){
+  const C=Core,lib=C.lib;
+  if(!lib)return;
+  const cands=lib.mode==='scout'?C.scoutList():null;
+  const n=lib.mode==='own'?C.G.library.length:lib.mode==='combo'?C.COMBO_TECHS.length:cands.length;
+  v.rect(60,40,840,460,0x060a18,0.96);v.stroke(60,40,840,460,0x8fb7ff,2);
+  v.text(84,TY(76,20),'選手ライブラリ',20,'#ffd76a',{bold:true});
+  const tabs=[['own','所持選手（'+C.G.library.length+'/'+C.LIB_MAX+'）',250],['combo','合体技',410],['scout','スカウト候補',570]];
+  for(const tb of tabs){
+    const mode=tb[0],label=tb[1],x=tb[2],on=lib.mode===mode;
+    v.rect(x,52,150,34,on?0x33507e:0x1a2438,1);
+    v.text(x+12,TY(74,15),label,15,on?'#ffd76a':'#99aabb');
+  }
+  v.text(740,TY(74,15),'ゆうじょうP '+C.G.yuujou,15,'#ffd76a');
+  const ROWS=C.LIB_ROWS;
+  if(lib.mode==='scout'){
+    v.text(76,TY(103,12),'F：スカウト可のみ '+(lib.only?'[ON]':'[OFF]')+'　表示 '+cands.length+'人',12,lib.only?'#ffd76a':'#99aabb');
+    const rows=C.scoutRows(cands),top=C.scoutScrollTop(cands);
+    for(let vi=0;vi<ROWS&&top+vi<rows.length;vi++){
+      const r=rows[top+vi],y=128+vi*26;
+      if(r.head!==undefined){
+        v.rect(76,y-19,394,24,0x1a2438,1);
+        v.text(84,TY(y,15),'― '+r.head+' ―',15,'#ffd76a');
+      }else{
+        const c=cands[r.ci];
+        if(r.ci===lib.sel)v.rect(76,y-19,394,24,0x33507e,1);
+        const nm=c.locked?'？？？':c.name;
+        const st=c.owned?'加入済み':c.locked?'ロック中':c.canScout?'スカウト可':'条件未達';
+        v.text(84,TY(y,15),nm+'（'+c.from+'）'+c.cost+'P '+st,15,c.owned?'#88aa88':c.locked?'#666677':c.canScout?'#ffd76a':'#ffffff');
+      }
+    }
+    if(rows.length>ROWS)v.text(84,TY(472,12),'（'+(top+1)+'〜'+Math.min(rows.length,top+ROWS)+' / '+rows.length+'行）',12,'#99aabb');
+  }else{
+    const top=C.libScrollTop(n);
+    for(let vi=0;vi<ROWS&&top+vi<n;vi++){
+      const i=top+vi,y=128+vi*26;
+      if(i===lib.sel)v.rect(76,y-19,394,24,0x33507e,1);
+      if(lib.mode==='own'){
+        const b=C.baseOf(C.G.library[i]);
+        if(b)v.text(84,TY(y,15),'['+C.ROLE_LABEL[C.roleOf(b.name)]+'] '+b.name+'（'+b.pos+'/'+b.elem+'）Lv'+C.progOf(b.name).lv,15,'#ffffff');
+      }else{
+        const c=C.COMBO_TECHS[i],st=C.comboState(c),ob=C.baseOf(c.owner);
+        const stTx=st.learned?'習得済み':st.canLearn?'習得可':st.canEvent?'イベント可':'条件未達';
+        v.text(84,TY(y,15),c.name+'（'+(ob?ob.short:c.owner)+'）'+stTx,15,st.learned?'#88aa88':st.canLearn?'#ffd76a':st.canEvent?'#ccffee':'#ffffff');
+      }
+    }
+    if(n>ROWS)v.text(84,TY(472,12),'（'+(top+1)+'〜'+Math.min(n,top+ROWS)+' / '+n+'）',12,'#99aabb');
+  }
+  /* 詳細ペイン */
+  if(lib.mode==='own'){
+    const b=C.baseOf(C.G.library[lib.sel]);
+    if(b)viewLibDetailOwn(v,b);
+  }else if(lib.mode==='combo'){
+    const c=C.COMBO_TECHS[lib.sel];
+    if(c)viewComboDetail(v,c);
+  }else{
+    const c=cands[lib.sel];
+    if(c)viewScoutDetail(v,c);
+  }
+  v.text(84,TY(492,12),
+    lib.mode==='own'?'↑↓:選択　Z:役割変更　←→:タブ切替　X:閉じる':
+    lib.mode==='combo'?'↑↓:選択　Z:ミニイベント／習得　←→:タブ切替　X:閉じる':
+    '↑↓:選択　PgUp/PgDn:ページ　F:絞込　Z:スカウト　←→:タブ切替　X:閉じる',12,'#99aabb');
+  if(lib.msg)v.text(486,TY(492,13),lib.msg,13,'#ffd76a');
+}
+function viewLibDetailOwn(v,base){
+  const C=Core,p=C.effPlayer(base),pr=C.progOf(base.name);
+  v.text(492,TY(116,19),p.name,19,'#ffffff',{bold:true});
+  v.text(492,TY(140,14),'出身 '+C.SCHOOL_OF[p.name]+'　'+p.pos+'／'+p.elem+'属性　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=C.LV_MAX?'MAX':C.expNeed(pr.lv)),14,'#99aabb');
+  v.text(492,TY(162,14),'役割：'+C.ROLE_LABEL[C.roleOf(p.name)]+'（Zで変更：未登録→控え→スタメン→リベロ→未登録）',14,'#99aabb');
+  C.STAT_NAMES.forEach((lb,i)=>{
+    const x=492+(i%4)*100,y=192+Math.floor(i/4)*28;
+    const bonus=p.st[i]-base.st[i];
+    v.text(x,TY(y,14),lb+' '+p.st[i]+(bonus>0?' (+'+bonus+')':''),14,'#ccffee');
+    v.rect(x,y+4,Math.min(84,p.st[i]),5,0x33507e,1);
+  });
+  v.text(492,TY(256,14),'必殺技（習得状況）',14,'#ffd76a');
+  const table=C.LEARN[base.name];
+  if(table){
+    table.forEach((t,i)=>{
+      const y=278+i*20;
+      const learned=t.unlock===0||(t.unlock>0&&pr.lv>=t.unlock)||(t.unlock===-1&&C.traditionReady(base.name));
+      const st=t.unlock===0?'習得済み':t.unlock>0?(learned?'習得済み':'Lv'+t.unlock+'で開放'):(learned?'習得済み':'イベントで習得');
+      v.text(500,TY(y,13),'・'+t.name+'（'+t.rank+'）　'+st,13,learned?'#ffffff':'#777788');
+    });
+  }else{
+    base.techs.forEach((t,i)=>{v.text(500,TY(278+i*20,13),'・'+t.name+'（'+t.rank+'）　習得済み',13,'#ffffff');});
+  }
+  const myCombos=C.COMBO_TECHS.filter(c=>(C.G.combo&&C.G.combo[c.name])&&(c.owner===base.name||c.partners.includes(base.name)));
+  let iy=384;
+  if(myCombos.length){v.text(492,TY(384,12),'合体技：'+myCombos.map(c=>c.name).join('／'),12,'#ffd76a');iy=396;}
+  v.text(492,TY(iy===384?396:iy,14),'紹介',14,'#eef');
+  v.text(500,iy+20,wrapJa(p.intro||'',376,'14px sans-serif'),14,'#ffffff',{ls:6});
+}
+function viewComboDetail(v,c){
+  const C=Core,st=C.comboState(c);
+  const catLabel={spike:'スパイク',block:'ブロック',receive:'レシーブ',toss:'トス',serve:'サーブ'}[c.cat]||c.cat;
+  v.text(492,TY(116,19),'合体技：'+c.name,19,'#ffffff',{bold:true});
+  v.text(492,TY(140,14),catLabel+'／'+c.elem+'属性　威力 '+c.rank+'（+'+c.pow+'）　消費TP '+c.tp,14,'#99aabb');
+  v.text(492,TY(162,14),'発動：'+c.owner+'　相方：'+c.partners.join('・'),14,'#99aabb');
+  v.text(492,TY(192,14),'習得条件',14,'#ffd76a');
+  const rows=[
+    [st.owned,'ペア全員がライブラリにいる（'+st.members.map(nm=>{const b=C.baseOf(nm);return (b?b.short:nm)+' Lv'+C.progOf(nm).lv;}).join('／')+'）'],
+    [st.lvOk,'ペア全員 Lv'+c.lv+' 以上'],
+    [st.eventSeen||st.eventWaived,st.eventWaived&&!st.eventSeen?'ミニイベント（ルート1の新規習得枠で免除）':'ミニイベントを見る'],
+  ];
+  if(c.retsu)rows.push([st.retsuOk,'ルート1全制覇＋高峰 烈の加入（合同練習）']);
+  rows.push([st.afford,'ゆうじょうP '+st.cost+'（所持 '+C.G.yuujou+'）']);
+  rows.forEach((r,i)=>{v.text(500,TY(218+i*22,14),(r[0]?'○ ':'× ')+r[1],14,r[0]?'#88ee88':'#ee8888');});
+  const y=218+rows.length*22+14;
+  if(st.learned)v.text(492,TY(y,14),'習得済み ― 試合で全員がコートにいる時に必殺技メニューに出る',14,'#88ee88');
+  else if(st.canEvent)v.text(492,TY(y,14),'Z：ミニイベントを見る',14,'#ffd76a');
+  else if(st.canLearn)v.text(492,TY(y,14),'Z：ゆうじょうP '+st.cost+' で習得する',14,'#ffd76a');
+  else v.text(492,TY(y,14),'条件を満たすと習得できる',14,'#99aabb');
+  v.text(492,TY(y+34,14),'試合中の使用条件',14,'#eef');
+  v.text(500,TY(y+56,13),'全員がコート内＋全員のTPがコスト以上＋全員のFPが30％以上（§9.3）',13,'#99aabb');
+  v.text(500,TY(y+76,13),'合体技で得点すると ゆうじょうP +2（1試合最大+10、§5.1）',13,'#99aabb');
+}
+function viewScoutDetail(v,c){
+  const C=Core;
+  if(c.locked){
+    v.text(492,TY(116,19),'？？？',19,'#ffffff',{bold:true});
+    const sc=C.SCOUT_SCHOOLS.find(s=>s.name===c.from);
+    v.text(492,TY(142,14),c.from+'の選手。'+(sc?sc.unlockText:''),14,'#99aabb');
+    return;
+  }
+  const b=C.baseOf(c.name);if(!b)return;
+  v.text(492,TY(116,19),c.name,19,'#ffffff',{bold:true});
+  v.text(492,TY(140,14),'出身 '+c.from+'　'+b.pos+'／'+b.elem+'属性　スカウト費用 ゆうじょうP '+c.cost,14,'#99aabb');
+  C.STAT_NAMES.forEach((lb,i)=>{
+    const x=492+(i%4)*100,y=178+Math.floor(i/4)*28;
+    v.text(x,TY(y,14),lb+' '+b.st[i],14,'#ccffee');
+  });
+  v.text(492,TY(248,14),'加入条件',14,'#ffd76a');
+  c.conds.forEach((cd,i)=>{
+    v.text(500,TY(272+i*22,14),(cd.ok?'○ ':'× ')+cd.text,14,cd.ok?'#88ee88':'#ee8888');
+  });
+  if(c.owned)v.text(500,TY(272+c.conds.length*22,14),'すでに仲間になっている',14,'#88ee88');
+  v.text(492,TY(376,14),'紹介',14,'#eef');
+  v.text(500,384,wrapJa(b.intro||'',376,'14px sans-serif'),14,'#ffffff',{ls:6});
+}
+/* ---------- Core のミニバトル編成（form）を描く ---------- */
+function viewForm(v){
+  const C=Core,form=C.form;
+  if(!form)return;
+  const team=form.team,roster=C.libPlayers();
+  v.rect(280,50,400,420,0x060a18,0.95);v.stroke(280,50,400,420,0xffd76a,2);
+  v.text(300,TY(84,18),'ミニバトル編成 ― vs '+team.name,18,'#ffd76a',{bold:true});
+  v.text(300,TY(106,12),'3人を選んでください（現在 '+form.sel.length+'/3）　必殺サーブは使用不可',12,'#99aabb');
+  const ROWS=C.FORM_ROWS,top=C.formScrollTop(roster.length);
+  for(let vi=0;vi<ROWS&&top+vi<roster.length;vi++){
+    const i=top+vi,p=roster[i],y=118+vi*34;
+    if(i===form.cur)v.rect(296,y,368,30,0x33507e,1);
+    const picked=form.sel.includes(i);
+    v.text(304,y+6,(i===form.cur?'▶':'　')+(picked?'● ':'○ ')+p.name+'（'+p.pos+'/'+p.elem+'）',16,picked?'#ffd76a':'#ffffff');
+    v.text(560,y+9,'スパ'+C.effSt(p,0)+' レシ'+C.effSt(p,2),12,'#99aabb');
+  }
+  if(form.sel.length===3){
+    v.rect(380,410,200,36,0x7a3b2e,1);
+    v.text(428,TY(433,16),'この3人で挑む',16,'#ffffff',{bold:true});
+  }
+  v.text(300,TY(462,12),'↑↓:移動　Z:選ぶ/外す　Enter:決定　X:やめる',12,'#99aabb');
+}
+
+/* ============================================================
+   タイトル画面（Core の titleUpdate を駆動し、状態を描画する）
+   「はじめから」の初期化・上書き警告・序章の自動再生・演出速度の
+   切り替えはすべて Core 側の実装がそのまま動く。
+   ============================================================ */
+class TitleScene extends Phaser.Scene{
+  constructor(){super('Title');}
+  create(){
+    this.input2=new CoreInput(this);
+    const g=this.add.graphics();
+    g.fillGradientStyle(0x16264d,0x16264d,0x0a0f22,0x0a0f22,1);
+    g.fillRect(0,0,960,540);
+    const titleT=this.add.text(480,116,'ファイアーシックス',{fontFamily:FONT,fontSize:'64px',color:'#ffd76a',fontStyle:'bold'}).setOrigin(0.5,0);
+    titleT.setStroke('#8a5a10',8);
+    titleT.setShadow(2,5,'rgba(0,0,0,.55)',4,true,false);
+    this.add.text(480,247,'廃部寸前の男女混合バレー部。再建の物語が始まる。',{fontFamily:FONT,fontSize:'15px',color:'#ffffff'}).setOrigin(0.5,0);
+    g.lineStyle(2,0xffd76a,0.8);
+    g.beginPath();g.moveTo(280,284);g.lineTo(680,284);g.strokePath();
+    g.fillStyle(0xffd76a,1);g.fillCircle(268,284,3);g.fillCircle(692,284,3);
+    this.add.text(480,265,'矢印キー：移動　Z：決定・話す　X：選手　L：ライブラリ／編成',{fontFamily:FONT,fontSize:'12px',color:'#99aabb'}).setOrigin(0.5,0);
+    /* 装飾のボール（ゆっくり上下する） */
+    makeBallTexture(this);
+    const ballA=this.add.image(138,146,'ball').setDisplaySize(56,56);
+    this.tweens.add({targets:ballA,y:122,duration:950,yoyo:true,repeat:-1,ease:'Sine.easeInOut'});
+    const ballB=this.add.image(828,102,'ball').setDisplaySize(34,34);
+    this.tweens.add({targets:ballB,y:86,duration:1250,yoyo:true,repeat:-1,ease:'Sine.easeInOut'});
+    this.view=new OpView(this,100,10);
+    this.add.text(480,462,'演出速度は Z キーで「通常／高速」を切り替え（カットインやボールの速さが変わります）',{fontFamily:FONT,fontSize:'12px',color:'#99aabb'}).setOrigin(0.5,0);
+    this.add.text(480,516,'ファイアーシックス Phaser版 ― 本編8試合＋加入・章イベント＋スカウト＋装備ショップ＋クリア後ルート3本＋合体技＋覚醒',{fontFamily:FONT,fontSize:'12px',color:'#99aabb'}).setOrigin(0.5,0);
+  }
+  update(){
+    this.input2.feed();
+    Core.__stepTitle();
+    /* 描画（Core の drawTitle 相当） */
+    const v=this.view;v.begin();
+    const items=['はじめから',Core.validSave()?'つづきから':'つづきから（セーブなし）',
+      '演出速度：'+(Core.fxFast()?'高速':'通常')];
+    items.forEach((s,i)=>{
+      const y=330+i*50;
+      if(i===Core.titleSel)v.rect(330,y-30,300,42,0x33507e,1);
+      v.text(480,TY(y,22),(i===Core.titleSel?'▶ ':'')+s,22,(i===1&&!Core.validSave())?'#666677':'#ffffff',{ox:0.5});
+    });
+    if(Core.titleWarn)v.text(480,TY(486,15),'セーブデータがあります。もう一度「はじめから」を選ぶと上書きして開始します',15,'#ff9a9a',{ox:0.5});
+    v.end();
+    if(Core.scene==='explore')this.scene.start('Explore');
+  }
+}
+/* ============================================================
+   探索シーン（Core の exploreUpdate を駆動し、状態を描画する）
+   マップ／NPC／スポット／会話／メニュー／特訓／ショップ／加入・章
+   イベント／クリア後ルート／ライブラリ／編成はすべて Core 側の
+   ロジックが動き、ここでは Core.player・curMapId・各UI状態を
+   Phaser で描く。マップ遷移（ワープ）は curMapId の変化で検出する。
+   ============================================================ */
+class ExploreScene extends Phaser.Scene{
+  constructor(){super('Explore');}
+  create(){
+    const C=Core;
+    this.mapId=C.curMapId;
+    this.mapData=C.MAPS[this.mapId];
+    this.input2=new CoreInput(this);
+    const map=this.mapData;
+    /* --- タイルマップ（バリエーション割り当ては描画側のみ） --- */
+    const tsKey=makeTileset(this,this.mapId);
+    const data=map.tiles.map((row,y)=>row.split('').map((ch,x)=>tileIndexFor(this.mapId,ch,x,y)));
+    const tm=this.make.tilemap({data:data,tileWidth:32,tileHeight:32});
+    const ts=tm.addTilesetImage('tiles',tsKey,32,32,0,0);
+    tm.createLayer(0,ts,0,0);
+    /* --- 装飾レイヤー（木・建物・小物。第4段階） --- */
+    buildExploreDecor(this,map,this.mapId);
+    this.add.text(map.labelX,map.labelY-15,map.label,{fontFamily:FONT,fontSize:'15px',color:'#20304a',fontStyle:'bold'}).setDepth(50);
+    /* --- 特訓スポットのマーカー（v1.0 drawExplore と同じ見た目） --- */
+    const SPOT_COLORS=[0xe0684a,0xc9a44a,0x4a9e6a,0x4a7ac9,0x9a5ac9,0x3fb8c9,0xb8724a,0x7ac94a];
+    const SPOT_SHORT=['スパ','ブロ','レシ','サー','トス','スピ','スタ','運'];
+    const sg=this.add.graphics().setDepth(60);
+    for(const s of (map.spots||[])){
+      const x=s.x*32,y=s.y*32;
+      if(s.id==='SHOP'){
+        sg.fillStyle(0xe0a33e,1);sg.fillRect(x+2,y+9,28,14);
+        this.add.text(x+11,y+11,'店',{fontFamily:FONT,fontSize:'9px',color:'#10131f',fontStyle:'bold'}).setDepth(61);
+      }else if(s.stat<0){
+        sg.fillStyle(0x57d95e,1);sg.fillRect(x+6,y+12,20,7);sg.fillRect(x+12,y+6,7,20);
+      }else if(s.hidden){
+        sg.fillStyle(0xffffff,0.4);sg.fillRect(x+14,y+14,4,4);
+      }else{
+        sg.fillStyle(SPOT_COLORS[s.stat],1);sg.fillRect(x+2,y+9,28,14);
+        this.add.text(x+5,y+11,SPOT_SHORT[s.stat],{fontFamily:FONT,fontSize:'9px',color:'#10131f',fontStyle:'bold'}).setDepth(61);
+      }
+    }
+    /* --- ワープの行き先ラベル（Core v1.0.2 の表示に合わせる。
+       ラベル全体がマップ内に収まるよう、Core と同じく左右位置をクランプする） --- */
+    for(const w of (map.warps||[])){
+      const dest=C.MAPS[w.to];if(!dest)continue;
+      const lt=this.add.text(w.x*32+16,w.y*32-17,'→ '+dest.name,{fontFamily:FONT,fontSize:'11px',color:'#ffd76a',
+        backgroundColor:'rgba(8,12,28,.85)',padding:{x:5,y:1}}).setOrigin(0.5,0).setDepth(62);
+      const half=lt.width/2,mapW=map.tiles[0].length*32;
+      lt.x=Math.max(half+2,Math.min(mapW-half-2,lt.x));
+    }
+    /* --- NPC（48×64 スプライト: 足元をタイル下端に合わせ、横はタイル中央） --- */
+    for(const n of map.npcs){
+      const key=makeCharaTexture(this,n.hair,n.uni,n.name);
+      this.add.sprite(n.x+16,n.y+33,key,'d0').setOrigin(0.5,1).setDepth(n.y+32);
+      this.add.text(n.x+16,n.y-38,n.name,{fontFamily:FONT,fontSize:'11px',color:'#ffffff'}).setOrigin(0.5,0).setDepth(n.y+33);
+    }
+    /* --- 話しかけプロンプト（Core の話しかけ判定＝最寄りNPCまで44px以内・
+       向き不問で斜めからも届く、と同じ条件で NPC の頭上に表示する） --- */
+    this.talkPrompt=this.add.text(0,0,'▼ 話す',{fontFamily:FONT,fontSize:'12px',color:'#ffffff',
+      backgroundColor:'rgba(8,12,28,.85)',padding:{x:5,y:2}}).setOrigin(0.5,0).setVisible(false);
+    /* --- プレイヤー（位置は Core.player が正。主人公はツンツン髪で固定） --- */
+    this.playerKey=makeCharaTexture(this,'#a03c28','#bfe3ff','高嶺 陽翔',1);
+    this.playerSpr=this.add.sprite(C.player.x+16,C.player.y+33,this.playerKey,'d0').setOrigin(0.5,1);
+    this.faceDir='d';
+    this.lastPx=C.player.x;this.lastPy=C.player.y;
+    /* --- HUD（所持P＋次の目標。カメラに追従させず画面固定） --- */
+    const hg=this.add.graphics().setDepth(800).setScrollFactor(0);
+    hg.fillStyle(0x080c1c,0.85);hg.fillRect(10,10,560,56);
+    hg.fillStyle(0x080c1c,0.7);hg.fillRect(620,10,330,24);
+    this.pointsT=this.add.text(20,18,'',{fontFamily:FONT,fontSize:'15px',color:'#ffd76a'}).setDepth(801).setScrollFactor(0);
+    this.goalT=this.add.text(20,42,'',{fontFamily:FONT,fontSize:'12px',color:'#ccffee'}).setDepth(801).setScrollFactor(0);
+    this.add.text(632,16,'Z:話す　X:選手　L:ライブラリ/編成',{fontFamily:FONT,fontSize:'12px',color:'#ccffee'}).setDepth(801).setScrollFactor(0);
+    /* --- カメラ（第4段階フォローアップ: v1.0.3 の拡大マップ 38×21 対応） ---
+       プレイヤーへ追従し、マップ端でクランプする */
+    const cam=this.cameras.main;
+    cam.setBounds(0,0,map.tiles[0].length*32,map.tiles.length*32);
+    cam.startFollow(this.playerSpr,true,0.12,0.12);
+    cam.centerOn(this.playerSpr.x,this.playerSpr.y); /* 初期位置へ即スナップ（パン防止） */
+    /* --- Core UI の描画ビュー --- */
+    this.view=new OpView(this,900,120);
+    this.refreshHud();
+  }
+  refreshHud(){
+    const C=Core;
+    this.pointsT.setText('ねっけつP '+C.G.nekketsu+'　ゆうじょうP '+C.G.yuujou+'　部費 '+(C.G.buhi||0)+'円');
+    this.goalT.setText(C.hudGoalLine()||'');
+  }
+  update(time,delta){
+    const C=Core;
+    const dt=Math.min(0.05,delta/1000||0.016);
+    this.input2.feed();
+    C.__stepExplore(dt);
+    /* シーン遷移の検出: 試合開始（Core.scene が 'match' に変わる） */
+    if(C.scene==='match'&&C.M){this.scene.start('Match');return;}
+    /* マップ遷移の検出: ワープで Core.curMapId が変わる */
+    if(C.curMapId!==this.mapId){this.scene.restart();return;}
+    /* プレイヤー描画（Core.player に追随。移動方向で歩行アニメを切り替える） */
+    const px=C.player.x,py=C.player.y;
+    const dx=px-this.lastPx,dy=py-this.lastPy;
+    const moving=(dx!==0||dy!==0);
+    this.playerSpr.setPosition(px+16,py+33).setDepth(py+32);
+    if(moving){
+      if(Math.abs(dx)>=Math.abs(dy))this.faceDir=dx>0?'r':'l';
+      else this.faceDir=dy>0?'d':'u';
+      this.playerSpr.play(this.playerKey+'-walk-'+this.faceDir,true);
+    }else{
+      this.playerSpr.anims.stop();
+      this.playerSpr.setFrame(this.faceDir+'0');
+    }
+    this.lastPx=px;this.lastPy=py;
+    this.refreshHud();
+    /* 話しかけプロンプト: 会話・メニュー等が開いていない時だけ、
+       判定範囲内（44px以内）の最寄りNPCの頭上に「▼ 話す」を出す */
+    let promptNpc=null;
+    if(!C.dlg&&!C.menu&&!C.lib&&!C.form&&!C.profileOpen){
+      let bd=44;
+      for(const n of this.mapData.npcs){
+        const d=Math.hypot(px-n.x,py-n.y);
+        if(d<bd){bd=d;promptNpc=n;}
+      }
+    }
+    if(promptNpc)this.talkPrompt.setPosition(promptNpc.x+16,promptNpc.y-62).setDepth(promptNpc.y+34).setVisible(true);
+    else this.talkPrompt.setVisible(false);
+    /* Core UI の描画（会話→メニュー→プロフィール→ライブラリ→編成の順に重ねる） */
+    const v=this.view;v.begin();
+    viewDialog(v);
+    viewMenu(v);
+    viewProfile(v);
+    viewLibrary(v);
+    viewForm(v);
+    v.end();
+  }
+}
+
+/* ---------- カットイン・イラストの振り分けデータ（第4段階） ----------
+   属性キー: generic-<属性キー>-<性別>.png のファイル名用。
+   性別: Core の選手データに性別フィールドが無いため、資料（characters.md 等）の
+   性別表から抽出した女性名簿（空白除去・122人）で判定する。名簿に無い選手は男扱い。
+   抽出は全250人分を資料と照合済み（女122／男128） */
+const ELEM_KEY={'火':'fire','風':'wind','林':'forest','山':'mountain'};
+const FEMALE_NAMES=new Set(["早瀬凪","大磯紗良","日向美月","速水葵","新葉ことり","磐城ひかり","佐伯美波","小早川詩織","西森かなえ","高瀬望","風宮澪","森宮千景","山城葵","緋山麗華","鬼頭澪","岩永千夏","姫野さくら","久住そら","森永楓","雨宮栞","折原美咲","桐原理世","黒岩怜奈","神楽さくら","明石奈緒","榊原唯","九条蓮華","椎名ほたる","日比野葵衣","ミア・コヴァチ","アンナ・ペトロワ","高岡美玲","水原梓","東雲梨乃","深沢ほのか","丘野真央","ミオ","メグミ","ハヤシ先生","クドウ事務員","エリ","サキ","ユウナ","モモカ","アヤカ","リョウコ","リン","ナナミ","カエデ","ヒナ","シオリ","アカリ","フミカ","チアキ","ノゾミ","ツムギ","ユカリ","マホ","エマ","ワカバ","フク","アオイ","スズカ","セナ","久遠凛","冬木奏","雨宮澪菜","柊ひまり","白瀬ことね","緑川葉月","巽美弦","葛城梨緒","芹沢葉菜","宇佐美涼乃","千歳弥生","真壁杏樹","鳴海唯花","藪下乃々華","堂島彩葉","皆川律花","アリサ・ボンダレンコ","ソフィア・レイエス","ミラ・フィッシャー","岩淵美羽","花岡るな","双葉夕陽","設楽遥香","高梨沙織","西条美空","氷室栞奈","霜田葵","氷見さゆり","冬月澪","畑中美土里","穂積ひなた","麦田すず","豊田梨花","詰本佳歩","飛車山凛","月待雫","桂原舞","節原律子","弦巻栞","笛田すみれ","小節あかり","舞田燈","緋鯉実玖","祭林咲","太鼓山凪咲","神薙一葉","祝部澄","榊田千歳","玉串雫","柏手涼","屋比久亜矢","金城海音","我那覇星","城間さゆり","迅瀬零","電宮怜","先読雫月","回線悠河"]);
+function genderOf(p){
+  return FEMALE_NAMES.has(String((p&&p.name)||'').replace(/[\s　]/g,''))?'f':'m';
+}
+
+/* ============================================================
+   試合シーン（Core の matchUpdate を駆動し、状態を描画する）
+   ラリー進行（サーブ→レシーブ→トス→スパイク→守備→得点）は
+   Core の状態機械がそのまま進む。セミリアルタイム指令型の
+   操作感（ボール飛行→コマンドメニューで停止→解決）は本体と
+   同じで、メニュー／カットイン／結果は Core の状態（menu／
+   M.cutin／M.result）を Phaser で描く。
+   ============================================================ */
+class MatchScene extends Phaser.Scene{
+  constructor(){super('Match');}
+  create(){
+    const C=Core;
+    this.input2=new CoreInput(this);
+    this.sprMap=new Map(); /* ランタイム選手オブジェクト → {spr,nameT,awT} */
+    /* --- 体育館の背景と観客席（上部4段） --- */
+    const g=this.add.graphics();
+    g.fillStyle(0x22392c,1);g.fillRect(0,0,960,540);
+    const BR=tileRand(777);
+    for(let row=0;row<4;row++){
+      const y=6+row*20;
+      g.fillStyle(row%2?0x3c4c61:0x46586e,1);g.fillRect(0,y,960,18);
+      for(let x=10;x<950;x+=17){
+        if(BR()<0.28)continue;
+        const skinC=[0xf2c79b,0xeebd8d,0xd99e6a][Math.floor(BR()*3)];
+        const cloth=[0xc95d5d,0x5d7ac9,0x5dc97a,0xe0c060,0xb07ac9,0xeef2f2,0x7ac9c0][Math.floor(BR()*7)];
+        g.fillStyle(cloth,1);g.fillRect(x,y+8,9,9);
+        g.fillStyle(skinC,1);g.fillRect(x+2,y+2,5,6);
+      }
+    }
+    g.fillStyle(0x2a3648,1);g.fillRect(0,86,960,4);
+    g.fillStyle(0x7a2e35,1);g.fillRect(14,120,124,32);g.fillRect(822,120,124,32);
+    this.add.text(76,128,'FIRE SIX',{fontFamily:FONT,fontSize:'14px',color:'#ffffff',fontStyle:'bold'}).setOrigin(0.5,0);
+    this.add.text(884,128,'VOLLEYBALL',{fontFamily:FONT,fontSize:'14px',color:'#ffffff',fontStyle:'bold'}).setOrigin(0.5,0);
+    /* --- コート（木目フロア＋ライン） --- */
+    this.add.image(180,90,makeCourtTexture(this)).setOrigin(0,0);
+    const lg=this.add.graphics();
+    lg.lineStyle(3,0xffffff,1);lg.strokeRect(180,90,600,360);
+    lg.lineStyle(2,0xffffff,0.85);
+    lg.beginPath();lg.moveTo(330,90);lg.lineTo(330,450);lg.moveTo(630,90);lg.lineTo(630,450);lg.strokePath();
+    lg.lineStyle(3,0xffffff,1);
+    lg.beginPath();lg.moveTo(480,90);lg.lineTo(480,450);lg.strokePath();
+    /* ポストとネット（メッシュは半透明テクスチャ） */
+    lg.fillStyle(0x555c66,1);lg.fillRect(471,74,4,392);lg.fillRect(485,74,4,392);
+    this.add.image(474,80,makeNetTexture(this)).setOrigin(0,0).setDepth(500);
+    /* --- ボール --- */
+    makeBallTexture(this);
+    this.ballSpr=this.add.sprite(480,270,'ball').setDepth(600);
+    /* --- ボール軌跡／ヒットエフェクト用（第4段階） --- */
+    this.fxG=this.add.graphics().setDepth(590);
+    this.ballTrail=[];this.hitFx=[];this.lastAnim=null;this.flightSpike=false;
+    this.recentAtt=null;this.lastScore=0;
+    /* --- カットイン用（顔ドット絵＋属性エフェクト） --- */
+    this.cutinFor=null;
+    this.cutinFx=this.add.graphics().setDepth(940).setVisible(false);
+    this.cutinImg=this.add.image(98,270,'ball').setDepth(950).setVisible(false);
+    /* イラスト表示時の切り抜きマスク: 帯（y=210〜330）の左側 380px だけを見せる。
+       横長イラストを大きく表示しても、帯の外と技名エリアにはみ出さない */
+    const cmg=this.make.graphics({add:false});
+    cmg.fillStyle(0xffffff,1);cmg.fillRect(0,210,380,120);
+    this.cutinMask=cmg.createGeometryMask();
+    /* --- カットイン・イラストのローダ（第4段階・3段フォールバック） ---
+       1) assets/cutin/<選手フルネーム（空白除去）>（本人イラスト）
+       2) assets/cutin/generic-<属性キー>-<性別>（属性×性別の汎用イラスト）
+       3) 顔ドット絵（従来）
+       実ファイルは manifest.json にある分だけ読み込み（無いファイルへの
+       404を防ぐ）、WebP を優先して PNG にフォールバックする。
+       読み込み成否はテクスチャキーごとに記録する */
+    this.cutinReg=new Map(); /* テクスチャキー -> {status:'loading'|'ok'|'ng',key} */
+    this.load.on('loaderror',file=>{
+      const rec=this.cutinReg.get(file.key);
+      if(rec)rec.status='ng';
+    });
+    this.cutinManifest=null; /* null=取得中。Set にファイル名一覧が入る */
+    this.cutinPending=[];
+    fetch('assets/cutin/manifest.json').then(r=>r.ok?r.json():[]).then(list=>{
+      this.cutinManifest=new Set(Array.isArray(list)?list:[]);
+      const pend=this.cutinPending;this.cutinPending=[];
+      for(const p of pend)this.ensureCutin(p);
+      if(C.M)for(const p of [...C.M.A.all,...C.M.H.all])this.ensureCutin(p);
+    }).catch(()=>{this.cutinManifest=new Set();this.cutinPending=[];});
+    if(C.M){
+      for(const p of [...C.M.A.all,...C.M.H.all])this.ensureCutin(p);
+      this.lastScore=C.M.scoreA+C.M.scoreH;
+    }
+    /* --- 描画ビュー（パネル／カットイン／結果／メニュー） --- */
+    this.view=new OpView(this,900,120);
+  }
+  /* テクスチャ1枚の読み込みを開始する（成否は cutinReg に記録） */
+  loadCutinTex(key,url){
+    if(this.cutinReg.has(key))return;
+    if(this.textures.exists(key)){this.cutinReg.set(key,{status:'ok',key:key});return;}
+    const rec={status:'loading',key:key};
+    this.cutinReg.set(key,rec);
+    this.load.image(key,url);
+    this.load.once('filecomplete-image-'+key,()=>{rec.status='ok';});
+    this.load.start();
+  }
+  /* 選手のカットイン素材（本人＋汎用）の読み込みを開始する。
+     manifest 取得前は保留し、取得後にまとめて読み込む */
+  ensureCutin(p){
+    if(this.cutinManifest===null){
+      if(!this.cutinPending.includes(p))this.cutinPending.push(p);
+      return;
+    }
+    const nm=String((p&&p.name)||'').replace(/[\s　]/g,'');
+    if(nm)this.loadCutinFile('cutin_'+nm,nm);
+    const ek=ELEM_KEY[p&&p.elem];
+    if(ek)this.loadCutinFile('cutingen_'+ek+'_'+genderOf(p),'generic-'+ek+'-'+genderOf(p));
+  }
+  /* ベース名（拡張子なし）から manifest 内の実ファイルを選び読み込む。
+     WebP 優先・PNG フォールバック。どちらも無ければ読みに行かない */
+  loadCutinFile(key,base){
+    if(this.cutinReg.has(key))return;
+    let file=null;
+    if(this.cutinManifest.has(base+'.webp'))file=base+'.webp';
+    else if(this.cutinManifest.has(base+'.png'))file=base+'.png';
+    if(!file){this.cutinReg.set(key,{status:'ng',key:key});return;}
+    this.loadCutinTex(key,'assets/cutin/'+encodeURIComponent(file));
+  }
+  /* 現在のカットインで使えるイラスト情報（{key,w,h} or null）。
+     本人イラスト優先、無ければ属性×性別の汎用イラスト */
+  cutinIlluFor(p){
+    const nm=String((p&&p.name)||'').replace(/[\s　]/g,'');
+    const ek=ELEM_KEY[p&&p.elem];
+    const keys=['cutin_'+nm];
+    if(ek)keys.push('cutingen_'+ek+'_'+genderOf(p));
+    for(const key of keys){
+      const rec=this.cutinReg.get(key);
+      if(!rec||rec.status!=='ok')continue;
+      const src=this.textures.get(rec.key).getSourceImage();
+      if(!src||!src.width)continue;
+      const H=336,W=Math.round(H*src.width/src.height);
+      return {key:rec.key,w:W,h:H};
+    }
+    return null;
+  }
+  entryFor(p,uni,facing){
+    let e=this.sprMap.get(p);
+    if(e)return e;
+    const key=makeCharaTexture(this,p.hair,uni,p.name||p.short);
+    const spr=this.add.sprite(p.x||480,p.y||270,key,'d0').setOrigin(0.5,1);
+    const nameT=this.add.text(0,0,p.short,{fontFamily:FONT,fontSize:'10px',color:'#ffffff'}).setOrigin(0.5,0);
+    const awT=this.add.text(0,0,'',{fontFamily:FONT,fontSize:'9px',color:'#ffd76a'}).setOrigin(0.5,0);
+    e={spr:spr,nameT:nameT,awT:awT,baseKey:key,facing:facing,pose:null,tex:null};
+    this.sprMap.set(p,e);
+    return e;
+  }
+  /* 対決の局面から各選手のアクションポーズを決める（描画側の解釈のみ。Core は不変） */
+  computePoses(M,time){
+    const poses=new Map();
+    const setP=(p,pose)=>{if(p&&pose&&!poses.has(p))poses.set(p,pose);};
+    const now=time||0;
+    if(M.cutin){
+      const cat=M.cutin.t&&M.cutin.t.cat;
+      setP(M.cutin.p,cat==='spike'?'spike':cat==='block'?'block':cat==='receive'?'receive':cat==='toss'?'toss':cat==='serve'?'toss':null);
+    }
+    if(M.phase==='spikeMenu')setP(M.actor,'spike');
+    else if(M.phase==='tossMenu')setP(M.actor,'toss');
+    else if(M.phase==='receiveMenu')setP(M.actor,'receive');
+    else if(M.phase==='serveMenu')setP(M.actor,'toss');
+    else if(M.phase==='defendMenu'){
+      setP(M.actor,'receive');
+      let bl=null;
+      for(const s of [1,2,3]){const p=M.A.court[s];if(p&&(!bl||p.st[1]>bl.st[1]))bl=p;}
+      setP(bl,'block');
+    }
+    if(M.ballAnim){
+      const b=M.ballAnim;
+      /* 飛来先の選手はレシーブ姿勢で迎える */
+      let dest=null,bd=1e9;
+      for(const t of [M.A,M.H])for(const p of t.court){
+        const d=(p.x-b.x1)*(p.x-b.x1)+(p.y-b.y1)*(p.y-b.y1);
+        if(d<bd){bd=d;dest=p;}
+      }
+      if(dest&&bd<1600)setP(dest,'receive');
+      /* スパイク飛行中: 打った選手はスパイク、相手前衛2枚はブロック */
+      if(M.pointActors&&M.pointActors[1]&&b.x1===480){
+        const att=M.pointActors[1];
+        setP(att,'spike');setP(M.pointActors[0],'toss');
+        const df=M.A.court.includes(att)?M.H:M.A;
+        const fronts=[1,2,3].map(s=>df.court[s]).filter(Boolean).sort((a,c)=>c.st[1]-a.st[1]);
+        setP(fronts[0],'block');setP(fronts[1],'block');
+        this.recentAtt={p:att,until:now+900};
+      }
+    }
+    if(!M.ballAnim&&this.recentAtt&&now<this.recentAtt.until)setP(this.recentAtt.p,'spike');
+    return poses;
+  }
+  applyPose(e,pose){
+    const spr=e.spr;
+    if(pose){
+      const pk=makePoseTexture(this,e.baseKey,pose);
+      if(e.tex!==pk){spr.setTexture(pk);e.tex=pk;}
+      spr.setFlipX(e.facing==='l');
+      const lift=pose==='spike'?-18:pose==='block'?-13:pose==='toss'?-3:0;
+      spr.y+=lift;
+    }else{
+      if(e.tex!==e.baseKey){spr.setTexture(e.baseKey,e.facing+'0');e.tex=e.baseKey;}
+      spr.setFlipX(false);
+      spr.setFrame(e.facing+'0');
+    }
+    e.pose=pose;
+  }
+  /* ボールの残像とヒットエフェクト（閃光・スピード線・火花）を描く */
+  drawBallFx(dt){
+    const fx=this.fxG;fx.clear();
+    /* 残像: 古いものほど小さく薄く */
+    this.ballTrail.forEach((pt,i)=>{
+      if(i===0)return;
+      const a=0.30*(1-i/this.ballTrail.length);
+      fx.fillStyle(0xffffff,a);fx.fillCircle(pt.x,pt.y,7-i*0.6);
+      fx.fillStyle(0x9fd0ff,a*0.8);fx.fillCircle(pt.x,pt.y,4-i*0.35);
+    });
+    /* ヒットエフェクト */
+    this.hitFx=this.hitFx.filter(h=>(h.t+=dt)<h.dur);
+    for(const h of this.hitFx){
+      const k=h.t/h.dur,R0=h.big?64:44;
+      /* 閃光コア */
+      fx.fillStyle(0xffffff,0.85*(1-k));fx.fillCircle(h.x,h.y,(h.big?16:11)*(1-k*0.5));
+      fx.fillStyle(0xffd76a,0.55*(1-k));fx.fillCircle(h.x,h.y,(h.big?30:20)*(0.4+k*0.6));
+      /* 拡散リング */
+      fx.lineStyle(3,0xffe9a0,0.8*(1-k));fx.strokeCircle(h.x,h.y,6+k*R0);
+      fx.lineStyle(2,0xffffff,0.5*(1-k));fx.strokeCircle(h.x,h.y,3+k*R0*0.6);
+      /* スピード線（放射状） */
+      fx.lineStyle(2,0xffffff,0.75*(1-k));
+      for(let i=0;i<8;i++){
+        const a=i*Math.PI/4+0.4,r1=8+k*R0*0.5,r2=r1+10+k*R0*0.5;
+        fx.beginPath();fx.moveTo(h.x+Math.cos(a)*r1,h.y+Math.sin(a)*r1);
+        fx.lineTo(h.x+Math.cos(a)*r2,h.y+Math.sin(a)*r2);fx.strokePath();
+      }
+      /* 火花 */
+      for(let i=0;i<6;i++){
+        const a=i*1.13+0.7,d=k*(h.big?52:36);
+        fx.fillStyle(i%2?0xffd76a:0xff8a3c,0.9*(1-k));
+        fx.fillRect(h.x+Math.cos(a)*d-1.5,h.y+Math.sin(a)*d-1.5,3,3);
+      }
+    }
+  }
+  update(time,delta){
+    const C=Core;
+    const dt=Math.min(0.05,delta/1000||0.016);
+    this.input2.feed();
+    C.__stepMatch(dt);
+    if(C.scene!=='match'){this.scene.start('Explore');return;}
+    const M=C.M;
+    if(!M)return;
+    /* --- 選手スプライト同期（コート内のみ表示） --- */
+    const poses=this.computePoses(M,time);
+    const onCourt=new Set();
+    const syncTeam=(team,uni,libUni,facing)=>{
+      for(const p of team.court){
+        onCourt.add(p);
+        const e=this.entryFor(p,p.pos==='L'?libUni:uni,facing);
+        e.spr.setVisible(true);e.nameT.setVisible(true);
+        e.spr.setPosition(p.x,p.y+20).setDepth(p.y+20);
+        this.applyPose(e,poses.get(p)||null);
+        const awL=C.awakeLeft(p);
+        e.nameT.setPosition(p.x,p.y-58).setDepth(p.y+21);
+        e.nameT.setColor(awL?'#ffd76a':'#ffffff');
+        e.nameT.setText((awL?'★':'')+p.short);
+        if(awL){e.awT.setVisible(true);e.awT.setPosition(p.x,p.y-70).setDepth(p.y+21);e.awT.setText('覚醒 残り'+awL);}
+        else e.awT.setVisible(false);
+      }
+    };
+    syncTeam(M.A,'#bfe3ff','#f2b13c','r'); /* 自チームはネット（右）向き */
+    syncTeam(M.H,'#eef2f2','#f2b13c','l'); /* 相手はネット（左）向き */
+    for(const [p,e] of this.sprMap){
+      if(!onCourt.has(p)){e.spr.setVisible(false);e.nameT.setVisible(false);e.awT.setVisible(false);}
+    }
+    /* --- ボール（軌跡・スピン・ヒットエフェクト） --- */
+    this.ballSpr.setPosition(M.ball.x,M.ball.y);
+    if(M.ballAnim){
+      if(this.lastAnim!==M.ballAnim){
+        this.lastAnim=M.ballAnim;
+        this.flightSpike=!!(M.pointActors&&M.pointActors[1]&&M.ballAnim.x1===480);
+      }
+      this.ballSpr.rotation+=dt*9;
+      const s=1+0.15*Math.sin(Math.min(1,M.ballAnim.t)*Math.PI);
+      this.ballSpr.setScale(s);
+      this.ballTrail.unshift({x:M.ball.x,y:M.ball.y});
+      if(this.ballTrail.length>9)this.ballTrail.pop();
+    }else{
+      if(this.lastAnim){ /* 飛行終了: スパイクのネット接触で閃光 */
+        if(this.flightSpike)this.hitFx.push({x:480,y:this.lastAnim.y1,t:0,dur:0.3,big:false});
+        this.lastAnim=null;this.flightSpike=false;
+      }
+      this.ballSpr.rotation=0;this.ballSpr.setScale(1);
+      if(this.ballTrail.length)this.ballTrail.pop();
+    }
+    /* 得点が入ったらボールの位置に大きめの閃光 */
+    const sc=M.scoreA+M.scoreH;
+    if(sc!==this.lastScore){
+      if(this.recentAtt&&time<this.recentAtt.until+600)
+        this.hitFx.push({x:M.ball.x,y:M.ball.y,t:0,dur:0.45,big:true});
+      this.lastScore=sc;
+    }
+    this.drawBallFx(dt);
+    /* --- パネル類の描画 --- */
+    const v=this.view;v.begin();
+    /* スコアボード */
+    v.rect(230,8,500,44,0x080c1c,0.92);
+    v.text(480,16,M.myName+' '+M.scoreA+' ― '+M.scoreH+' '+M.oppName,22,'#ffffff',{bold:true,ox:0.5});
+    v.text(736,TY(32,12),'● '+(M.serve==='A'?M.myName:M.oppName)+'サーブ',12,'#ffd76a');
+    /* メッセージバー（試合結果の表示中は結果文をパネル側に任せ、
+       バーには描かない。「探索に戻る」メニューとの重なりを避ける） */
+    v.rect(180,456,600,42,0x080c1c,0.88);
+    if(!(M.over&&M.result))v.text(192,464,wrapJa(M.msg||'',566,'15px sans-serif'),15,'#ffffff',{ls:3});
+    /* チームパネル（自チームのコート内選手 FP/TP） */
+    v.rect(6,452,168,84,0x080c1c,0.88);
+    M.A.court.forEach((p,i)=>{
+      const y=458+i*11,awL=C.awakeLeft(p);
+      v.text(10,y,(awL?'★':'')+p.short,10,C.isAwake(p)?'#ffd76a':'#ccffee');
+      v.rect(44,y+1,58,5,0x28406b,1);v.rect(108,y+1,40,5,0x28406b,1);
+      v.rect(44,y+1,58*clamp(p.fp/p.maxFP,0,1),5,0x57d95e,1);
+      v.rect(108,y+1,40*clamp(p.tp/p.maxTP,0,1),5,0xffd76a,1);
+      if(awL)v.text(152,y,'残'+awL,9,'#ffd76a');
+    });
+    v.text(10,524,'緑:FP 黄:TP'+(M.mini?'':'　タイムアウト残り'+(M.timeouts?M.timeouts.A:0)),10,'#99aabb');
+    /* 覚醒中の選手の枠（属性色） */
+    for(const t of [M.A,M.H])for(const p of t.court){
+      if(C.isAwake(p))v.stroke(p.x-25,p.y-45,50,66,C16(C.ELEM[p.elem].c),2);
+    }
+    /* アクターパネル（コマンド選択中の選手） */
+    if(M.actor&&(C.menu||M.phase==='defendMenu')){
+      const p=M.actor,col=C16(C.ELEM[p.elem].c);
+      v.rect(6,120,240,170,0x080c1c,0.94);v.stroke(6,120,240,170,col,2);
+      v.text(16,TY(146,16),p.name,16,'#ffffff',{bold:true});
+      v.text(16,TY(164,12),p.pos+' / '+p.elem+'属性',12,'#99aabb');
+      v.text(16,TY(182,12),'FP '+Math.round(p.fp)+'/'+p.maxFP+'　TP '+Math.round(p.tp)+'/'+p.maxTP,12,'#99aabb');
+      const lb=['スパイク','ブロック','レシーブ','サーブ','トス','スピード'];
+      lb.forEach((s,i)=>{v.text(16+(i%2)*110,TY(204+Math.floor(i/2)*18,12),s+' '+p.st[i],12,'#ccffee');});
+      v.text(16,246,wrapJa(p.intro||'',224,'11px sans-serif'),11,'#eef',{ls:4});
+    }
+    /* 結果パネル（初回説明などで note が長くなっても下端で切れないよう、
+       パネルを上下に広げ、note は行数を数えてパネル下端にアンカーする。
+       Lvアップ表示は note と重ならない件数までに制限する） */
+    if(M.over&&M.result){
+      const r=M.result;
+      const PB=448; /* パネル下端（メッセージバー 456 の直上） */
+      v.rect(230,56,500,PB-56,0x040814,0.88);v.stroke(230,56,500,PB-56,0xffd76a,2);
+      v.text(480,TY(118,34),r.win?'勝 利！':'敗 北…',34,'#ffffff',{bold:true,ox:0.5});
+      v.text(480,TY(161,20),M.myName+' '+M.scoreA+' ― '+M.scoreH+' '+M.oppName,20,'#ffffff',{ox:0.5});
+      v.text(480,TY(200,17),(r.rk||r.yk||r.buhi)?('ねっけつP +'+r.rk+'　ゆうじょうP +'+r.yk+(r.buhi?'　部費 +'+r.buhi+'円':'')):'報酬なし（また挑戦しよう）',17,'#ffd76a',{ox:0.5});
+      if(r.expSummary)v.text(480,TY(228,14),r.expSummary,14,'#ccffee',{ox:0.5});
+      const note=r.note?r.note:(M.mini?(r.win?'ミニバトル勝利！':'負けてもゲームオーバーにはならない。再戦可能')
+        :(r.win?M.oppName+'に勝利！ 次の相手へ向けて特訓しよう':'再挑戦は凪から。作戦ヒントか補助モードが選べる'));
+      const noteLines=wrapJa(note,464,'12px sans-serif').split('\n').length;
+      const noteTop=PB-8-(noteLines*16-4);
+      const maxUps=Math.max(0,Math.min(6,Math.floor((noteTop-262)/22)+1));
+      (r.levelUps||[]).slice(0,maxUps).forEach((u,i)=>{
+        v.text(480,TY(256+i*22,15),'Lvアップ！ '+u.short+' → Lv'+u.lv+(u.techs.length?'　新技「'+u.techs.join('」「')+'」習得':''),15,'#ffd76a',{ox:0.5});
+      });
+      v.text(480,noteTop,wrapJa(note,464,'12px sans-serif'),12,'#99aabb',{ox:0.5,ls:4});
+    }
+    /* カットイン */
+    if(M.cutin){
+      const c=M.cutin,col=C16(C.ELEM[c.p.elem].c);
+      const illu=this.cutinIlluFor(c.p);
+      const tx=illu?400:186;
+      v.rect(0,0,960,540,0x000000,0.45);
+      v.rect(0,210,960,120,col,1);
+      v.rect(0,222,960,10,0xffffff,0.15);v.rect(0,308,960,10,0xffffff,0.15);
+      if(!illu){v.rect(26,202,144,136,0x000000,0.35);v.stroke(26,202,144,136,col,2);} /* 顔ドット絵の土台（イラスト時は出さない） */
+      v.text(tx,TY(248,15),c.p.name+'（'+c.p.elem+'）',15,'#ffffff',{bold:true});
+      /* 技名は残り幅に合わせて自動で縮小する（長い技名でも右端へはみ出さない） */
+      const tlen=c.t.name.length+1,tsize=Math.min(38,Math.floor((960-tx-20)/tlen));
+      v.text(tx,TY(300,tsize),c.t.name+'！',tsize,'#ffffff',{bold:true});
+      v.text(700,TY(248,14),c.t.awake?'全対決値 +10％（3ラリー）':'威力 '+c.t.rank+' ／ TP '+c.t.tp+' 消費',14,'#ffffff');
+    }
+    /* 会話（試合中に開くことは基本ないが、保険として Core と同じ順序で描く） */
+    viewDialog(v);
+    /* メニュー（最前面） */
+    viewMenu(v);
+    v.end();
+    /* カットイン演出（イラスト優先＋属性エフェクト。OpView より前面に置く）
+       3段フォールバック: 本人イラスト → 属性×性別の汎用イラスト → 顔ドット絵 */
+    if(M.cutin){
+      const c=M.cutin;
+      this.ensureCutin(c.p);
+      if(this.cutinFor!==c){
+        this.cutinFor=c;
+        const illu=this.cutinIlluFor(c.p);
+        if(illu){
+          this.cutinImg.setTexture(illu.key);
+          this.cutinImg.setDisplaySize(illu.w,illu.h);
+          this.cutinImg.setPosition(36+illu.w/2,282);
+          this.cutinImg.setMask(this.cutinMask);
+        }else{
+          const fk=makeFaceTexture(this,c.p.hair,C.ELEM[c.p.elem].c,c.p.name||c.p.short);
+          this.cutinImg.setTexture(fk);
+          this.cutinImg.setDisplaySize(132,132);
+          this.cutinImg.setPosition(98,270);
+          this.cutinImg.clearMask();
+        }
+        this.cutinImg.setVisible(true);
+        this.cutinFx.setVisible(true);
+      }else{
+        /* 読み込みがカットイン開始後に完了した場合はイラストへ差し替える */
+        const illu=this.cutinIlluFor(c.p);
+        if(illu&&this.cutinImg.texture.key!==illu.key){
+          this.cutinImg.setTexture(illu.key);
+          this.cutinImg.setDisplaySize(illu.w,illu.h);
+          this.cutinImg.setPosition(36+illu.w/2,282);
+          this.cutinImg.setMask(this.cutinMask);
+        }
+      }
+      this.drawCutinFx(c.p.elem);
+    }else if(this.cutinFor){
+      this.cutinFor=null;
+      this.cutinImg.setVisible(false);
+      this.cutinImg.clearMask();
+      this.cutinFx.clear();
+      this.cutinFx.setVisible(false);
+    }
+  }
+  /* 属性エフェクト: 炎の揺らぎ／風の流れ／葉の舞い／岩の隆起を Graphics で描く */
+  drawCutinFx(elem){
+    const fx=this.cutinFx;fx.clear();
+    const t=this.time.now/1000;
+    const fr=(i,k)=>{const v=Math.sin(i*127.1+k*311.7)*43758.5453;return v-Math.floor(v);};
+    const col=C16(Core.ELEM[elem].c);
+    if(elem==='火'){
+      const cols=[0xff5030,0xff8a3c,0xffd76a];
+      for(let i=0;i<16;i++){
+        const x=24+fr(i,1)*900,base=332,h=26+fr(i,2)*64+Math.sin(t*9+i*1.7)*6;
+        fx.fillStyle(cols[i%3],0.5);
+        fx.fillTriangle(x,base,x+13,base,x+6.5,base-h);
+      }
+      for(let i=0;i<10;i++){
+        const x=30+fr(i,3)*900,y=326-((t*70+i*41)%118);
+        fx.fillStyle(0xffd76a,0.8);fx.fillRect(x,y,3,3);
+      }
+    }else if(elem==='風'){
+      fx.lineStyle(2,0xbff2ff,0.75);
+      for(let i=0;i<12;i++){
+        const y=222+fr(i,1)*100,x=((t*300+i*113)%1120)-80;
+        fx.beginPath();fx.moveTo(x,y);fx.lineTo(x+30+fr(i,2)*36,y);fx.strokePath();
+      }
+      fx.lineStyle(2,col,0.5);
+      for(let i=0;i<6;i++){
+        const y=230+fr(i,4)*88,x=((t*190+i*167)%1060)-50;
+        fx.beginPath();fx.moveTo(x,y);fx.lineTo(x+18,y);fx.strokePath();
+      }
+    }else if(elem==='林'){
+      const cols=[0x3fae5a,0x63c474,0x2c7a40];
+      for(let i=0;i<14;i++){
+        const x=(fr(i,1)*940+t*26*(0.5+fr(i,2)))%980-10;
+        const y=216+((fr(i,3)*130+t*34*(0.6+fr(i,4)))%118);
+        fx.fillStyle(cols[i%3],0.85);fx.fillEllipse(x,y,10,5);
+      }
+    }else{ /* 山 */
+      const cols=[0xd29a3d,0x8a6a3a,0xb8862f];
+      for(let i=0;i<11;i++){
+        const x=30+i*84+fr(i,1)*24,base=332,h=16+fr(i,2)*36+Math.sin(t*3+i)*2;
+        fx.fillStyle(cols[i%3],0.8);
+        fx.fillTriangle(x,base,x+20,base,x+10,base-h);
+      }
+      for(let i=0;i<8;i++){
+        const x=40+fr(i,5)*880,y=300-((t*24+i*29)%70);
+        fx.fillStyle(0xe8cf9a,0.6);fx.fillRect(x,y,3,3);
+      }
+    }
+  }
+}
+
+/* ---------- 起動 ---------- */
+window.addEventListener('load',async()=>{
+  const msg=document.getElementById('boot-msg');
+  try{
+    if(!window.Phaser)throw new Error('Phaser（CDN）の読み込みに失敗しました');
+    Core=await loadCore();
+    msg.style.display='none';
+    window.FS_CORE=Core; /* 動作確認用ハンドル */
+    window.FS_GAME=new Phaser.Game({
+      type:Phaser.AUTO,
+      parent:'game',
+      width:960,height:540,
+      backgroundColor:'#10131f',
+      pixelArt:true,
+      scale:{mode:Phaser.Scale.FIT,autoCenter:Phaser.Scale.CENTER_BOTH},
+      scene:[TitleScene,ExploreScene,MatchScene],
+    });
+  }catch(e){
+    msg.textContent='起動エラー：'+e.message+' ― GitHub Pages などの HTTP 環境で、ゲーム本体（core.html または index.html）と同じフォルダに置いて開いてください（file:// では読み込めません）。';
+  }
+});
+</script>
+</body>
+</html>
