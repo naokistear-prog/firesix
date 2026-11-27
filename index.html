@@ -2,12 +2,23 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#10131f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ファイアーシックス">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="assets/icon-192.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 <title>ファイアーシックス（Phaser版）</title>
 <style>
   html,body{margin:0;padding:0;background:#10131f;color:#eef;font-family:"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;}
+  /* スマホ対応: 意図しないスクロール／ピンチ・ダブルタップズーム／引っ張り更新を防ぐ */
+  html,body{height:100%;overflow:hidden;touch-action:none;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
+  #game{position:fixed;inset:0;}
   #boot-msg{max-width:960px;margin:40px auto;padding:16px;font-size:15px;line-height:1.7;color:#cfe;}
-  #game canvas{display:block;margin:0 auto;}
+  #game canvas{display:block;margin:0 auto;touch-action:none;}
 </style>
 </head>
 <body>
@@ -23,11 +34,19 @@ window.addEventListener('load',function(){
     if(m)m.textContent='起動エラー：Phaser（CDN）の読み込みに失敗しました。通信環境を確認して、再読み込みしてください。';
   }
 });
+/* iOS Safari のピンチズーム（gesturestart）とダブルタップズームを抑止する */
+document.addEventListener('gesturestart',function(e){e.preventDefault();});
+document.addEventListener('dblclick',function(e){e.preventDefault();},{passive:false});
 </script>
 <script>
 "use strict";
 /* ============================================================
    ファイアーシックス Phaser版 ― フェーズ6 第4段階（グラフィック強化）
+   ＋最終フェーズ（スマホ対応）: タッチ操作（仮想十字キー＋決定／
+   キャンセル／ライブラリ／絞り込みのオンスクリーンボタン、タップで
+   メニュー・会話・試合コマンド選択）、縦持ち時の横持ち推奨案内、
+   スクロール／ズーム抑止、PWA風 manifest＋アイコン（ホーム画面追加）。
+   タッチUIは (pointer: coarse) の端末でのみ表示し、PCでは出さない。
    第4段階の内容: ドット絵を 48×64 に精密化（2段シェーディング＋輪郭線）、
    試合中のアクションポーズ（スパイク／レシーブ／トス／ブロック）、
    ボールの残像・スピンとスパイク決定時のヒットエフェクト、
@@ -811,16 +830,30 @@ function makeNetTexture(scene){
 }
 
 /* ---------- 入力ブリッジ: Phaser の入力を Core の入力モデルへ流す ---------- */
+/* スマホ対応: 現在アクティブなシーンの CoreInput（タッチUIが流し込む先）と、
+   オンスクリーンボタンの矩形（ゲーム座標 960×540）。ボタン上のタップは
+   ゲーム画面へのクリックとして扱わない（ボタン操作と画面タップの二重発火防止） */
+let ACTIVE_INPUT=null;
+let FS_TOUCH_ON=false; /* タッチUI表示中か */
+const FS_TOUCH_RECTS=[]; /* {x1,y1,x2,y2} */
+function fsInTouchRect(x,y){
+  for(const r of FS_TOUCH_RECTS)if(x>=r.x1&&x<=r.x2&&y>=r.y1&&y<=r.y2)return true;
+  return false;
+}
 class CoreInput{
   constructor(scene){
     this.pressQ=[];this.clickQ=[];this.held={};
+    ACTIVE_INPUT=this;
     const kb=scene.input.keyboard;
     if(kb){
       kb.addCapture(['UP','DOWN','LEFT','RIGHT','SPACE','W','A','S','D','Z','X','L','F','ENTER','ESC','PAGEUP','PAGEDOWN']);
       kb.on('keydown',e=>{this.held[e.key]=true;if(!e.repeat)this.pressQ.push(e.key);});
       kb.on('keyup',e=>{this.held[e.key]=false;});
     }
-    scene.input.on('pointerdown',p=>{this.clickQ.push({x:p.x,y:p.y});});
+    scene.input.on('pointerdown',p=>{
+      if(FS_TOUCH_ON&&fsInTouchRect(p.x,p.y))return; /* オンスクリーンボタン上のタップは除外 */
+      this.clickQ.push({x:p.x,y:p.y});
+    });
   }
   /* 押下エッジとクリックを Core に渡す（保持キーは __hold で毎回同期する）。
      Core 側のステップ関数が pressed／mouseClick を消費・クリアする */
@@ -836,6 +869,95 @@ class CoreInput{
   /* プログラムからキー押下を注入する（動作確認用） */
   press(k){this.pressQ.push(k);}
   click(x,y){this.clickQ.push({x:x,y:y});}
+}
+
+/* ---------- スマホ対応: オンスクリーン・タッチUI（全シーン共通の重ねシーン） ----------
+   仮想十字キー（移動）と Z／X／L／F ボタンを、タッチ端末でのみ表示する。
+   入力は ACTIVE_INPUT（現在のゲームシーンの CoreInput）の held／pressQ へ
+   キーボードと同じキー名で流すため、Core 側は無改造でタッチ操作できる。
+   タイトル／会話／メニュー／ライブラリ／試合コマンドは、画面タップ自体も
+   Core の mouseClick 処理でそのまま効く（ボタン矩形内だけ除外する）。
+   表示判定: (pointer: coarse) の端末のみ。PC（fine ポインタ）では出さない。
+   動作確認用に URL の ?touch=1 でも強制表示できる */
+const FS_FORCE_TOUCH=/[?&]touch=1/.test(location.search);
+function fsTouchCapable(){
+  if(FS_FORCE_TOUCH)return true;
+  return !!(window.matchMedia&&window.matchMedia('(pointer: coarse)').matches);
+}
+class TouchScene extends Phaser.Scene{
+  constructor(){super('Touch');}
+  create(){
+    this.input.addPointer(3); /* マルチタッチ（十字キーを押しながら決定、等） */
+    this.built=false;
+    this.hintBg=null;this.hintT=null;this.btns=[];
+    if(fsTouchCapable())this.build();
+    else window.addEventListener('touchstart',()=>this.build(),{once:true});
+    /* ボタン外で指を離した場合も保持キーを確実に解除する */
+    this.input.on('pointerup',p=>{
+      for(const b of this.btns)if(b.pointers.has(p.id)){b.pointers.delete(p.id);if(!b.pointers.size)this.releaseBtn(b);}
+    });
+  }
+  build(){
+    if(this.built)return;
+    this.built=true;FS_TOUCH_ON=true;
+    const D=990; /* 全シーンより前面 */
+    this.g=this.add.graphics().setDepth(D);
+    const defs=[
+      /* 仮想十字キー（左下）: 押している間 Arrow キーを保持する */
+      {x:100,y:389,k:'ArrowUp',label:'▲',hold:true,s:52},
+      {x:100,y:501,k:'ArrowDown',label:'▼',hold:true,s:52},
+      {x:44,y:445,k:'ArrowLeft',label:'◀',hold:true,s:52},
+      {x:156,y:445,k:'ArrowRight',label:'▶',hold:true,s:52},
+      /* アクションボタン（右下）: 指で押しやすい大きさ */
+      {x:878,y:472,k:'z',label:'決定',sub:'Z',hold:false,s:72},
+      {x:788,y:502,k:'x',label:'戻る',sub:'X',hold:false,s:54},
+      {x:788,y:424,k:'l',label:'編成',sub:'L',hold:false,s:54},
+      {x:882,y:390,k:'f',label:'絞込',sub:'F',hold:false,s:48},
+    ];
+    for(const def of defs)this.addBtn(def,D);
+    /* 縦持ち時の横持ち推奨案内（上部の帯。タップは妨げない） */
+    this.hintBg=this.add.rectangle(480,26,640,36,0x080c1c,0.85).setDepth(D+5).setVisible(false);
+    this.hintT=this.add.text(480,26,'横向き推奨：端末を横にすると大きく表示されます',{fontFamily:FONT,fontSize:'15px',color:'#ffd76a'}).setOrigin(0.5).setDepth(D+6).setVisible(false);
+  }
+  addBtn(def,depth){
+    const half=def.s/2;
+    const rect={x1:def.x-half,y1:def.y-half,x2:def.x+half,y2:def.y+half};
+    FS_TOUCH_RECTS.push(rect);
+    this.add.text(def.x,def.y-(def.sub?9:0),def.label,{fontFamily:FONT,fontSize:(def.s>=70?'19px':'15px'),color:'#ffffff',fontStyle:'bold'}).setOrigin(0.5).setDepth(depth+2);
+    if(def.sub)this.add.text(def.x,def.y+13,def.sub,{fontFamily:FONT,fontSize:'10px',color:'#99c2ff'}).setOrigin(0.5).setDepth(depth+2);
+    const zone=this.add.zone(def.x,def.y,def.s,def.s).setInteractive();
+    const btn={def:def,pointers:new Set()};
+    zone.on('pointerdown',p=>{btn.pointers.add(p.id);this.applyBtn(btn);});
+    const release=p=>{if(btn.pointers.delete(p.id)&&!btn.pointers.size)this.releaseBtn(btn);};
+    zone.on('pointerup',release);
+    zone.on('pointerout',release);
+    this.btns.push(btn);
+    this.drawBtn(btn,false);
+  }
+  applyBtn(btn){
+    const inp=ACTIVE_INPUT;if(!inp)return;
+    if(!btn.def.hold)inp.pressQ.push(btn.def.k); /* 押下エッジ（決定など） */
+    inp.held[btn.def.k]=true;
+    this.drawBtn(btn,true);
+  }
+  releaseBtn(btn){
+    if(ACTIVE_INPUT)ACTIVE_INPUT.held[btn.def.k]=false;
+    this.drawBtn(btn,false);
+  }
+  drawBtn(btn,on){
+    const def=btn.def,half=def.s/2,g=this.g;
+    g.fillStyle(on?0x33507e:0x0a1022,on?0.92:0.62);
+    g.lineStyle(2,0x8fb7ff,on?1:0.75);
+    g.fillRoundedRect(def.x-half,def.y-half,def.s,def.s,14);
+    g.strokeRoundedRect(def.x-half,def.y-half,def.s,def.s,14);
+  }
+  update(){
+    if(!this.built)return;
+    /* 縦持ち（幅＜高さ）の時だけ横持ち推奨を出す */
+    const portrait=window.innerWidth<window.innerHeight;
+    if(this.hintT)this.hintT.setVisible(portrait);
+    if(this.hintBg)this.hintBg.setVisible(portrait);
+  }
 }
 
 /* ---------- 描画ヘルパー: 矩形＋テキストの「オプ」を毎フレーム適用する ---------- */
@@ -1127,6 +1249,9 @@ class TitleScene extends Phaser.Scene{
   constructor(){super('Title');}
   create(){
     this.input2=new CoreInput(this);
+    /* スマホ対応: タッチUI（重ねシーン）を起動して最前面に置く */
+    if(!this.scene.isActive('Touch'))this.scene.launch('Touch');
+    this.scene.bringToTop('Touch');
     const g=this.add.graphics();
     g.fillGradientStyle(0x16264d,0x16264d,0x0a0f22,0x0a0f22,1);
     g.fillRect(0,0,960,540);
@@ -1791,7 +1916,7 @@ window.addEventListener('load',async()=>{
       backgroundColor:'#10131f',
       pixelArt:true,
       scale:{mode:Phaser.Scale.FIT,autoCenter:Phaser.Scale.CENTER_BOTH},
-      scene:[TitleScene,ExploreScene,MatchScene],
+      scene:[TitleScene,ExploreScene,MatchScene,TouchScene],
     });
   }catch(e){
     msg.textContent='起動エラー：'+e.message+' ― GitHub Pages などの HTTP 環境で、ゲーム本体（core.html または index.html）と同じフォルダに置いて開いてください（file:// では読み込めません）。';
