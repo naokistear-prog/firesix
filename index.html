@@ -50,6 +50,16 @@ document.addEventListener('dblclick',function(e){e.preventDefault();},{passive:f
    会話ウィンドウには話者の顔を表示する（本人カットインイラストが
    manifest にある話者はイラストの顔切り抜き、無い話者は歩行チップと
    同じ割り当てのドット顔。ナレーション行は顔なし）。
+   必殺技演出の強化（Phaser 側の演出層のみ。Core は不変）:
+   カットイン中はレターボックス（上下の黒帯）がせり出し、イラストは
+   ゆっくりズーム＋パンし、帯にはスピード線が流れる。発動中は使用者に
+   属性色の溜めオーラが出て、必殺技のボールには属性別の軌跡（火=炎の
+   尾／風=渦／林=葉／山=土煙）が付く。ボールが放たれる瞬間と得点の
+   瞬間には、技の威力ランク（弱／中／強／最強）で量が変わるヒット
+   ストップと画面シェイクが入る。効果音は WebAudio のシンセ生成
+   （音源ファイルなし）で、カットイン突入／溜め／打撃／得点の4種。
+   ON/OFF は localStorage 'firesix_se' に保存し、タイトル右上か
+   M キーで切り替える（演出速度 'firesix_fx' の既存仕様とは独立）。
    第4段階の内容: ドット絵を 48×64 に精密化（2段シェーディング＋輪郭線）、
    試合中のアクションポーズ（スパイク／レシーブ／トス／ブロック）、
    ボールの残像・スピンとスパイク決定時のヒットエフェクト、
@@ -189,6 +199,102 @@ function wrapJa(text,widthPx,font){
   if(line)lines.push(line);
   return lines.join('\n');
 }
+/* ---------- 効果音（WebAudio シンセ生成。音源ファイルは使わない） ----------
+   必殺技演出強化に合わせて追加した Phaser 側専用の仕組みで、Core には
+   一切触れない。ON/OFF は localStorage 'firesix_se'（'on'／'off'、既定 on）
+   に保存し、タイトル画面右上の表示か M キーで切り替える。
+   ブラウザの自動再生制限に配慮し、AudioContext は初回のユーザー操作
+   （pointerdown／keydown）で初期化・再開する。鳴動は SE.log に記録し、
+   動作確認用に window.FS_SE から参照できる。音量は控えめ（master 0.22） */
+const SE=(()=>{
+  let ctx=null,master=null,noiseBuf=null;
+  let enabled=true;
+  try{enabled=window.localStorage.getItem('firesix_se')!=='off';}catch(e){}
+  const log=[];
+  function ensure(){
+    if(ctx){if(ctx.state==='suspended')ctx.resume();return ctx;}
+    try{
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(!AC)return null;
+      ctx=new AC();
+      master=ctx.createGain();master.gain.value=0.22;master.connect(ctx.destination);
+    }catch(e){ctx=null;}
+    return ctx;
+  }
+  function tone(o){ /* {f0,f1,type,dur,vol,a,delay} */
+    const t0=ctx.currentTime+(o.delay||0);
+    const osc=ctx.createOscillator(),g=ctx.createGain();
+    osc.type=o.type||'sine';
+    osc.frequency.setValueAtTime(Math.max(20,o.f0),t0);
+    if(o.f1)osc.frequency.exponentialRampToValueAtTime(Math.max(20,o.f1),t0+o.dur);
+    g.gain.setValueAtTime(0,t0);
+    g.gain.linearRampToValueAtTime(o.vol,t0+(o.a||0.008));
+    g.gain.exponentialRampToValueAtTime(0.0008,t0+o.dur);
+    osc.connect(g);g.connect(master);
+    osc.start(t0);osc.stop(t0+o.dur+0.05);
+  }
+  function noise(o){ /* {dur,vol,f0,f1,type,q,a,delay} */
+    if(!noiseBuf){
+      noiseBuf=ctx.createBuffer(1,ctx.sampleRate,ctx.sampleRate);
+      const d=noiseBuf.getChannelData(0);
+      for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+    }
+    const t0=ctx.currentTime+(o.delay||0);
+    const src=ctx.createBufferSource();src.buffer=noiseBuf;src.loop=true;
+    const fl=ctx.createBiquadFilter();fl.type=o.type||'bandpass';fl.Q.value=o.q||0.9;
+    fl.frequency.setValueAtTime(Math.max(30,o.f0||1000),t0);
+    if(o.f1)fl.frequency.exponentialRampToValueAtTime(Math.max(30,o.f1),t0+o.dur);
+    const g=ctx.createGain();
+    g.gain.setValueAtTime(0,t0);
+    g.gain.linearRampToValueAtTime(o.vol,t0+(o.a||0.01));
+    g.gain.exponentialRampToValueAtTime(0.0008,t0+o.dur);
+    src.connect(fl);fl.connect(g);g.connect(master);
+    src.start(t0);src.stop(t0+o.dur+0.05);
+  }
+  function play(name,fn){
+    const ok=enabled&&!!ensure();
+    log.push({n:name,t:Math.round(performance.now()),ok:!!ok});
+    if(log.length>80)log.shift();
+    if(!ok)return;
+    try{fn();}catch(e){}
+  }
+  const RANKV={'弱':0.35,'中':0.55,'強':0.8,'最強':1};
+  return {
+    log:log,
+    get enabled(){return enabled;},
+    ensure:ensure,
+    toggle:function(){
+      enabled=!enabled;
+      try{window.localStorage.setItem('firesix_se',enabled?'on':'off');}catch(e){}
+      return enabled;
+    },
+    /* カットイン突入: 風切りノイズ＋低い衝撃音 */
+    cutin:function(){play('cutin',()=>{
+      noise({dur:0.32,vol:0.5,f0:500,f1:2600,q:1.2});
+      tone({f0:170,f1:65,type:'sine',dur:0.28,vol:0.5});
+    });},
+    /* 溜め: カットイン表示中に上っていく持続音 */
+    charge:function(fast){play('charge',()=>{
+      const d=fast?0.38:0.85;
+      tone({f0:150,f1:740,type:'triangle',dur:d,vol:0.16,a:0.05});
+      tone({f0:303,f1:1490,type:'sine',dur:d,vol:0.06,a:0.05});
+    });},
+    /* 打撃: 必殺技のボールが放たれる瞬間。威力ランクで音量が変わる */
+    hit:function(rank){const v=RANKV[rank]||0.55;play('hit:'+rank,()=>{
+      noise({dur:0.13,vol:0.55*v+0.15,type:'lowpass',f0:1100,f1:220});
+      tone({f0:250,f1:52,type:'sine',dur:0.2,vol:0.65*v+0.1});
+    });},
+    /* 得点: 自チームは上昇2音、相手は下降2音 */
+    score:function(mine){play('score',()=>{
+      if(mine){tone({f0:659,type:'triangle',dur:0.1,vol:0.26});tone({f0:880,type:'triangle',dur:0.16,vol:0.26,delay:0.09});}
+      else{tone({f0:392,type:'triangle',dur:0.1,vol:0.2});tone({f0:311,type:'triangle',dur:0.16,vol:0.2,delay:0.09});}
+    });},
+  };
+})();
+window.FS_SE=SE;
+window.addEventListener('pointerdown',()=>SE.ensure(),{passive:true});
+window.addEventListener('keydown',()=>SE.ensure());
+
 /* ---------- ドット絵ユーティリティ（第3段階） ---------- */
 function hashStr(s){let h=2166136261;s=String(s);for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
 /* 色を f 倍に暗く／明るくする（'#rgb' 形式にも対応） */
@@ -1427,6 +1533,13 @@ class TitleScene extends Phaser.Scene{
     this.tweens.add({targets:ballB,y:86,duration:1250,yoyo:true,repeat:-1,ease:'Sine.easeInOut'});
     this.view=new OpView(this,100,10);
     this.add.text(480,462,'演出速度は Z キーで「通常／高速」を切り替え（カットインやボールの速さが変わります）',{fontFamily:FONT,fontSize:'12px',color:'#99aabb'}).setOrigin(0.5,0);
+    /* 効果音 ON/OFF（Phaser 側設定。localStorage 'firesix_se' に保存）。
+       Core のタイトルメニュー矩形（x 330〜630）の外なので、Core の
+       クリック選択とは競合しない。タップ／クリックと M キーで切り替える */
+    this.seT=this.add.text(952,10,'♪ 効果音：'+(SE.enabled?'ON':'OFF')+'（M）',{fontFamily:FONT,fontSize:'13px',color:'#99c9ff'}).setOrigin(1,0).setInteractive({useHandCursor:true});
+    const seFlip=()=>{SE.ensure();this.seT.setText('♪ 効果音：'+(SE.toggle()?'ON':'OFF')+'（M）');};
+    this.seT.on('pointerup',seFlip);
+    this.input.keyboard.on('keydown-M',seFlip);
     this.add.text(480,516,'ファイアーシックス Phaser版 ― 本編8試合＋加入・章イベント＋スカウト＋装備ショップ＋クリア後ルート3本＋合体技＋覚醒',{fontFamily:FONT,fontSize:'12px',color:'#99aabb'}).setOrigin(0.5,0);
   }
   update(){
@@ -1592,6 +1705,21 @@ function genderOf(p){
   return FEMALE_NAMES.has(String((p&&p.name)||'').replace(/[\s　]/g,''))?'f':'m';
 }
 
+/* ---------- 必殺技演出強化用ヘルパー（Phaser 側の解釈のみ。Core は不変） ----------
+   技の威力ランクは Core の技データ（t.rank＝弱／中／強／最強、t.pow）から
+   読み取るだけ。ヒットストップ秒とシェイク量はランクで段階付ける */
+function rankOfTech(t){
+  if(!t)return '中';
+  if(t.rank)return t.rank;
+  const pw=t.pow||0;
+  return pw>=50?'最強':pw>=32?'強':pw>=18?'中':'弱';
+}
+const HITSTOP_S={'弱':0.04,'中':0.06,'強':0.085,'最強':0.12};   /* 放たれる瞬間 */
+const HITSTOP_P={'弱':0.05,'中':0.07,'強':0.10,'最強':0.14};    /* 得点の瞬間 */
+const SHAKE_F={'弱':0.0012,'中':0.0022,'強':0.0036,'最強':0.0055}; /* 飛行開始 */
+const SHAKE_P={'弱':0.0020,'中':0.0035,'強':0.0055,'最強':0.0085}; /* 得点 */
+const ELEM_TINT={'火':0xffb27a,'風':0xcfeeff,'林':0xc4ffc4,'山':0xe8cf9a};
+
 /* ============================================================
    試合シーン（Core の matchUpdate を駆動し、状態を描画する）
    ラリー進行（サーブ→レシーブ→トス→スパイク→守備→得点）は
@@ -1642,7 +1770,15 @@ class MatchScene extends Phaser.Scene{
     /* --- ボール軌跡／ヒットエフェクト用（第4段階） --- */
     this.fxG=this.add.graphics().setDepth(590);
     this.ballTrail=[];this.hitFx=[];this.lastAnim=null;this.flightSpike=false;
-    this.recentAtt=null;this.lastScore=0;
+    this.recentAtt=null;this.lastScore=0;this.lastScoreA=0;this.lastScoreH=0;
+    /* --- 必殺技演出強化用（Phaser 側のみ） ---
+       lbProg: レターボックスの開き具合（0..1）／prevCutin: カットイン遷移検出
+       lastCutin: 終了したカットインの {elem,rank,cat,at}（直後の飛行へ属性を付ける）
+       flightElem: 現在の飛行が必殺技なら {elem,rank,cat}
+       justScoredElem: 飛行終了と同フレームの得点判定用に保持する flightElem
+       hitStopT: ヒットストップ残り秒（この間 Core の進行を止める） */
+    this.lbProg=0;this.prevCutin=null;this.lastCutin=null;
+    this.flightElem=null;this.justScoredElem=null;this.hitStopT=0;
     /* --- カットイン用（顔ドット絵＋属性エフェクト） --- */
     this.cutinFor=null;
     this.cutinFx=this.add.graphics().setDepth(940).setVisible(false);
@@ -1675,6 +1811,7 @@ class MatchScene extends Phaser.Scene{
     if(C.M){
       for(const p of [...C.M.A.all,...C.M.H.all])this.ensureCutin(p);
       this.lastScore=C.M.scoreA+C.M.scoreH;
+      this.lastScoreA=C.M.scoreA;this.lastScoreH=C.M.scoreH;
     }
     /* --- 描画ビュー（パネル／カットイン／結果／メニュー） --- */
     this.view=new OpView(this,900,120);
@@ -1798,12 +1935,53 @@ class MatchScene extends Phaser.Scene{
   /* ボールの残像とヒットエフェクト（閃光・スピード線・火花）を描く */
   drawBallFx(dt){
     const fx=this.fxG;fx.clear();
-    /* 残像: 古いものほど小さく薄く */
+    const MM=Core.M;
+    /* 必殺技の溜めオーラ: カットインの間、使用者を属性色の光で包む。
+       進み具合（timer 1.15→0）で輪が広がり、火花が上っていく */
+    if(MM&&MM.cutin){
+      const cp=MM.cutin.p,ccol=C16(Core.ELEM[cp.elem].c);
+      const tt=this.time.now/1000,pr=clamp(1-(MM.cutin.timer/1.15),0,1);
+      const cx=cp.x,cy=cp.y+2,R=26+pr*17+Math.sin(tt*10)*2;
+      fx.fillStyle(ccol,0.15+0.10*pr);fx.fillEllipse(cx,cy,R*1.15,R*1.55);
+      fx.fillStyle(0xffffff,0.09+0.08*pr);fx.fillEllipse(cx,cy,R*0.62,R*0.9);
+      fx.lineStyle(2,ccol,0.75);fx.strokeEllipse(cx,cy,R*1.15,R*1.55);
+      for(let i=0;i<7;i++){
+        const ph=(tt*0.9+i/7)%1;
+        const px=cx+Math.sin(i*2.39+tt*3)*R*0.7,py=cy+18-ph*56;
+        fx.fillStyle(i%2?0xffffff:ccol,0.85*(1-ph));fx.fillRect(px-1.5,py-1.5,3,3);
+      }
+    }
+    /* 残像: 古いものほど小さく薄く。必殺技の飛行中は属性別の軌跡になる */
+    const tnow=this.time.now/1000;
     this.ballTrail.forEach((pt,i)=>{
       if(i===0)return;
-      const a=0.30*(1-i/this.ballTrail.length);
-      fx.fillStyle(0xffffff,a);fx.fillCircle(pt.x,pt.y,7-i*0.6);
-      fx.fillStyle(0x9fd0ff,a*0.8);fx.fillCircle(pt.x,pt.y,4-i*0.35);
+      const k=i/this.ballTrail.length,a=0.30*(1-k);
+      if(!pt.elem){
+        fx.fillStyle(0xffffff,a);fx.fillCircle(pt.x,pt.y,7-i*0.6);
+        fx.fillStyle(0x9fd0ff,a*0.8);fx.fillCircle(pt.x,pt.y,4-i*0.35);
+        return;
+      }
+      if(pt.elem==='火'){ /* 炎の尾: 3色の火球が揺らぎながら細る */
+        const cols=[0xff5030,0xff8a3c,0xffd76a];
+        const fl=Math.sin(tnow*34+i*2.1)*1.6;
+        fx.fillStyle(cols[(i+((tnow*9)|0))%3],0.55*(1-k));
+        fx.fillCircle(pt.x,pt.y+fl*0.4,Math.max(1.5,8-i*0.5));
+        if(i%3===0){fx.fillStyle(0xffd76a,0.7*(1-k));fx.fillRect(pt.x-1,pt.y-8-i*0.4,2,2);}
+      }else if(pt.elem==='風'){ /* 渦: 弧の連なりと風切りの粒（明るい床でも見えるよう濃いめに） */
+        fx.lineStyle(2,0x7ac9e8,0.8*(1-k));
+        fx.beginPath();fx.arc(pt.x,pt.y,6+i*0.8,i*0.9+tnow*6,i*0.9+tnow*6+2.2);fx.strokePath();
+        fx.lineStyle(2,0xe8fbff,0.65*(1-k));
+        fx.beginPath();fx.arc(pt.x,pt.y,3.5+i*0.5,i*0.9+tnow*6+2.6,i*0.9+tnow*6+4.6);fx.strokePath();
+        fx.fillStyle(0xffffff,0.6*(1-k));fx.fillCircle(pt.x,pt.y,2.2);
+      }else if(pt.elem==='林'){ /* 葉: 緑の葉片が舞う */
+        const cols=[0x3fae5a,0x63c474,0x2c7a40];
+        fx.fillStyle(cols[i%3],0.85*(1-k));
+        fx.fillEllipse(pt.x,pt.y+Math.sin(i*1.7)*2,Math.max(3,11-i*0.55),Math.max(2,5.5-i*0.3));
+      }else{ /* 山: 土煙が広がって沈む（重量感） */
+        fx.fillStyle(i%2?0xb8862f:0x8a6a3a,0.38*(1-k));
+        fx.fillCircle(pt.x,pt.y+2+k*5,5+i*0.55);
+        fx.fillStyle(0xe8cf9a,0.4*(1-k));fx.fillCircle(pt.x,pt.y,2.4);
+      }
     });
     /* ヒットエフェクト */
     this.hitFx=this.hitFx.filter(h=>(h.t+=dt)<h.dur);
@@ -1833,11 +2011,30 @@ class MatchScene extends Phaser.Scene{
   update(time,delta){
     const C=Core;
     const dt=Math.min(0.05,delta/1000||0.016);
-    this.input2.feed();
-    C.__stepMatch(dt);
+    /* ヒットストップ中は入力も Core の進行も止める（描画だけ続ける）。
+       数十〜百数十ms の短時間だけなので、ラリーのテンポは壊さない */
+    if(this.hitStopT>0){
+      this.hitStopT-=dt;
+    }else{
+      this.input2.feed();
+      C.__stepMatch(dt);
+    }
     if(C.scene!=='match'){this.scene.start('Explore');return;}
     const M=C.M;
     if(!M)return;
+    /* --- カットインの開始／終了を検出して演出フックを打つ --- */
+    if(M.cutin&&this.prevCutin!==M.cutin){
+      SE.cutin();SE.charge(C.fxFast());
+    }
+    if(!M.cutin&&this.prevCutin){
+      const pc=this.prevCutin;
+      this.lastCutin={elem:(pc.t&&pc.t.elem)||pc.p.elem,rank:rankOfTech(pc.t),cat:pc.t?pc.t.cat:null,at:time};
+    }
+    this.prevCutin=M.cutin||null;
+    /* レターボックスの開閉（目標へなめらかに寄せる） */
+    const lbTgt=M.cutin?1:0;
+    this.lbProg+=(lbTgt-this.lbProg)*Math.min(1,dt*10);
+    if(Math.abs(lbTgt-this.lbProg)<0.02)this.lbProg=lbTgt;
     /* --- 選手スプライト同期（コート内のみ表示） --- */
     const poses=this.computePoses(M,time);
     const onCourt=new Set();
@@ -1867,16 +2064,35 @@ class MatchScene extends Phaser.Scene{
       if(this.lastAnim!==M.ballAnim){
         this.lastAnim=M.ballAnim;
         this.flightSpike=!!(M.pointActors&&M.pointActors[1]&&M.ballAnim.x1===480);
+        /* カットイン直後の最初の飛行＝その必殺技のボールとして属性を付ける
+           （AI必殺スパイクはカットイン→守備メニュー→飛行の順でも拾えるよう、
+           得点で消費されるまで保持する）。放たれる瞬間に打撃音＋小ヒット
+           ストップ＋小シェイクを入れる */
+        this.flightElem=null;this.justScoredElem=null;
+        if(this.lastCutin&&time-this.lastCutin.at<9000){
+          this.flightElem={elem:this.lastCutin.elem,rank:this.lastCutin.rank,cat:this.lastCutin.cat};
+          this.lastCutin=null;
+          SE.hit(this.flightElem.rank);
+          const hs=HITSTOP_S[this.flightElem.rank]||0.06;
+          this.hitStopT=Math.max(this.hitStopT,C.fxFast()?hs*0.4:hs);
+          this.cameras.main.shake(110,SHAKE_F[this.flightElem.rank]||0.002);
+          const tn=ELEM_TINT[this.flightElem.elem];
+          if(tn)this.ballSpr.setTint(tn);
+        }
       }
       this.ballSpr.rotation+=dt*9;
       const s=1+0.15*Math.sin(Math.min(1,M.ballAnim.t)*Math.PI);
       this.ballSpr.setScale(s);
-      this.ballTrail.unshift({x:M.ball.x,y:M.ball.y});
-      if(this.ballTrail.length>9)this.ballTrail.pop();
+      this.ballTrail.unshift({x:M.ball.x,y:M.ball.y,elem:this.flightElem?this.flightElem.elem:null});
+      const cap=this.flightElem?15:9;
+      if(this.ballTrail.length>cap)this.ballTrail.pop();
     }else{
       if(this.lastAnim){ /* 飛行終了: スパイクのネット接触で閃光 */
         if(this.flightSpike)this.hitFx.push({x:480,y:this.lastAnim.y1,t:0,dur:0.3,big:false});
         this.lastAnim=null;this.flightSpike=false;
+        /* 得点は飛行終了と同フレームに確定するので、属性は得点判定まで保持 */
+        this.justScoredElem=this.flightElem;this.flightElem=null;
+        this.ballSpr.clearTint();
       }
       this.ballSpr.rotation=0;this.ballSpr.setScale(1);
       if(this.ballTrail.length)this.ballTrail.pop();
@@ -1886,8 +2102,18 @@ class MatchScene extends Phaser.Scene{
     if(sc!==this.lastScore){
       if(this.recentAtt&&time<this.recentAtt.until+600)
         this.hitFx.push({x:M.ball.x,y:M.ball.y,t:0,dur:0.45,big:true});
-      this.lastScore=sc;
+      /* 得点音＋、必殺技で決まった点なら強めのヒットストップとシェイク */
+      SE.score(M.scoreA>this.lastScoreA);
+      const fe=this.flightElem||this.justScoredElem;
+      if(fe){
+        const hs=HITSTOP_P[fe.rank]||0.07;
+        this.hitStopT=Math.max(this.hitStopT,C.fxFast()?hs*0.4:hs);
+        this.cameras.main.shake(170,SHAKE_P[fe.rank]||0.003);
+      }
+      this.lastCutin=null; /* ラリー終了。次のラリーの飛行へ誤って付けない */
+      this.lastScore=sc;this.lastScoreA=M.scoreA;this.lastScoreH=M.scoreH;
     }
+    this.justScoredElem=null;
     this.drawBallFx(dt);
     /* --- パネル類の描画 --- */
     const v=this.view;v.begin();
@@ -1946,6 +2172,13 @@ class MatchScene extends Phaser.Scene{
       });
       v.text(480,noteTop,wrapJa(note,464,'12px sans-serif'),12,'#99aabb',{ox:0.5,ls:4});
     }
+    /* レターボックス（必殺技の間）: カットイン中は上下に黒帯がせり出し、
+       終わると収まる。帯の内側ではスコア等の文字はそのまま読める */
+    if(this.lbProg>0.02){
+      const bh=Math.round(46*this.lbProg);
+      v.rect(0,0,960,bh,0x000000,0.96);
+      v.rect(0,540-bh,960,bh,0x000000,0.96);
+    }
     /* カットイン */
     if(M.cutin){
       const c=M.cutin,col=C16(C.ELEM[c.p.elem].c);
@@ -1953,6 +2186,9 @@ class MatchScene extends Phaser.Scene{
       const tx=illu?400:186;
       v.rect(0,0,960,540,0x000000,0.45);
       v.rect(0,210,960,120,col,1);
+      /* 突入直後の一瞬だけ白フラッシュ（帯の中だけ。控えめに） */
+      const cpr=clamp(1-(c.timer/1.15),0,1);
+      if(cpr<0.14)v.rect(0,210,960,120,0xffffff,(0.14-cpr)/0.14*0.32);
       v.rect(0,222,960,10,0xffffff,0.15);v.rect(0,308,960,10,0xffffff,0.15);
       if(!illu){v.rect(26,202,144,136,0x000000,0.35);v.stroke(26,202,144,136,col,2);} /* 顔ドット絵の土台（イラスト時は出さない） */
       v.text(tx,TY(248,15),c.p.name+'（'+c.p.elem+'）',15,'#ffffff',{bold:true});
@@ -1997,6 +2233,19 @@ class MatchScene extends Phaser.Scene{
           this.cutinImg.setPosition(36+illu.w/2,282);
           this.cutinImg.setMask(this.cutinMask);
         }
+      }
+      /* ゆっくりズーム＋パン: 静止画のカットインに「間」の動きを持たせる。
+         イラストはマスク（帯の左 380px）の内側で大きくなるだけなので、
+         既存レイアウト（帯マスク＋技名）は崩れない */
+      const zpr=clamp(1-(c.timer/1.15),0,1);
+      const illuZ=this.cutinIlluFor(c.p);
+      if(illuZ){
+        const z=1+0.08*zpr;
+        this.cutinImg.setDisplaySize(illuZ.w*z,illuZ.h*z);
+        this.cutinImg.setPosition(36+illuZ.w/2+zpr*12,282);
+      }else{
+        const sz=132*(1+0.05*zpr);
+        this.cutinImg.setDisplaySize(sz,sz);
       }
       this.drawCutinFx(c.p.elem);
     }else if(this.cutinFor){
@@ -2053,6 +2302,17 @@ class MatchScene extends Phaser.Scene{
         const x=40+fr(i,5)*880,y=300-((t*24+i*29)%70);
         fx.fillStyle(0xe8cf9a,0.6);fx.fillRect(x,y,3,3);
       }
+    }
+    /* スピード線: 帯を横切る流線で疾走感を足す（白＋属性色、控えめな透明度） */
+    fx.lineStyle(2,0xffffff,0.26);
+    for(let i=0;i<10;i++){
+      const y=216+fr(i,7)*108,x=((t*900+i*197)%1240)-140,len=60+fr(i,8)*90;
+      fx.beginPath();fx.moveTo(x,y);fx.lineTo(x+len,y);fx.strokePath();
+    }
+    fx.lineStyle(1,col,0.35);
+    for(let i=0;i<6;i++){
+      const y=218+fr(i,9)*104,x=((t*700+i*263)%1200)-120;
+      fx.beginPath();fx.moveTo(x,y);fx.lineTo(x+44+fr(i,10)*60,y);fx.strokePath();
     }
   }
 }
