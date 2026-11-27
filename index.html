@@ -168,7 +168,7 @@ async function loadCore(){
     'saveGame:saveGame,loadGame:loadGame,hasSave:hasSave,validSave:validSave,ensureSave:ensureSave,'+
     'goalText:goalText,hudGoalLine:hudGoalLine,coreCount:coreCount,joinStep:joinStep,eventNpcIds:eventNpcIds,'+
     'STAT_NAMES:STAT_NAMES,ELEM:ELEM,RANK:RANK,tech:tech,'+
-    'baseOf:baseOf,progOf:progOf,effSt:effSt,effPlayer:effPlayer,'+
+    'baseOf:baseOf,progOf:progOf,effSt:effSt,effPlayer:effPlayer,growthTypeOf:growthTypeOf,'+
     'libPlayers:libPlayers,teamPlayers:teamPlayers,teamProblem:teamProblem,'+
     'trainCheck:trainCheck,doTrain:doTrain,'+
     'buyEquip:buyEquip,equipOf:equipOf,equipSlotShort:equipSlotShort,equipSlotText:equipSlotText,equipPriceOf:equipPriceOf,'+
@@ -1323,7 +1323,17 @@ function viewMenu(v){
     const i=top+r,it=menu.items[i];if(!it)continue;
     const iy=menu.y+5+r*ROW;
     if(i===menu.sel){v.rect(menu.x+4,iy,menu.w-8,30,0x33507e,1);v.rect(menu.x+4,iy,3,30,0xffd76a,1);}
-    v.text(menu.x+10,iy+5,(i===menu.sel?'▶ ':'　')+it.label,17,it.disabled?'#666677':'#ffffff');
+    /* v1.1: ラベルが sub（TPコスト等）に重ならないよう、残り幅に合わせて
+       フォントを段階縮小し、それでも収まらなければ末尾を省略する */
+    const label=(i===menu.sel?'▶ ':'　')+it.label;
+    let subW=0;
+    if(it.sub){_mc.font='12px '+FONT;subW=_mc.measureText(it.sub).width;}
+    const avail=menu.w-20-(subW?subW+8:0);
+    let fs=17;_mc.font=fs+'px '+FONT;
+    while(fs>11&&_mc.measureText(label).width>avail){fs-=2;_mc.font=fs+'px '+FONT;}
+    let txt=label;
+    if(_mc.measureText(txt).width>avail){while(txt.length>1&&_mc.measureText(txt+'…').width>avail)txt=txt.slice(0,-1);txt+='…';}
+    v.text(menu.x+10,iy+5,txt,fs,it.disabled?'#666677':'#ffffff');
     if(it.sub)v.text(menu.x+menu.w-10,iy+8,it.sub,12,'#99aabb',{ox:1});
   }
   if(menu.items.length>vis)v.text(menu.x+menu.w-6,menu.y+h-14,'▲▼ '+(menu.sel+1)+'/'+menu.items.length,11,'#99aabb',{ox:1});
@@ -1348,7 +1358,7 @@ function viewProfile(v){
   const base=list[sel];if(!base)return;
   const p=C.effPlayer(base),pr=C.progOf(base.name);
   v.text(420,TY(116,19),p.name+'（'+(C.SCHOOL_OF[p.name]||'')+'）',19,'#ffffff',{bold:true});
-  v.text(420,TY(142,15),'ポジション '+p.pos+'　属性 '+p.elem+'　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=C.LV_MAX?'MAX':C.expNeed(pr.lv)),15,'#99aabb');
+  v.text(420,TY(142,15),'ポジション '+p.pos+'　属性 '+p.elem+'　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=C.LV_MAX?'MAX':C.expNeed(pr.lv))+'　成長 '+C.growthTypeOf(base.name),15,'#99aabb');
   v.text(420,TY(164,15),'FP '+p.maxFP+'　TP '+p.maxTP+'（TP最大値はLv連動）',15,'#99aabb');
   C.STAT_NAMES.forEach((lb,i)=>{
     const x=420+(i%4)*118,y=192+Math.floor(i/4)*30;
@@ -1371,8 +1381,11 @@ function viewProfile(v){
       v.text(436,TY(300+i*22,14),'・'+t.name+'（'+t.rank+'／TP'+t.tp+'）　習得済み',14,'#ffffff');
     });
   }
-  v.text(420,TY(412,15),'紹介',15,'#eef');
-  v.text(436,420,wrapJa(p.intro||'',420,'15px sans-serif'),15,'#ffffff',{ls:7});
+  /* v1.1: 通算成績（公式戦・ルート戦のみ集計） */
+  const car=(C.G.career||{})[base.name];
+  v.text(420,TY(406,13),car?('通算：'+car.matches+'試合 '+car.wins+'勝　得点'+car.pts+'（スパイク'+car.spike+'・ブロック'+car.block+'・エース'+car.ace+'）　ディグ'+car.dig):'通算：まだ試合に出ていない',13,'#ccffee');
+  v.text(420,TY(428,15),'紹介',15,'#eef');
+  v.text(436,436,wrapJa(p.intro||'',420,'15px sans-serif'),15,'#ffffff',{ls:7});
   v.text(420,TY(486,12),'↑↓で選択　Xで閉じる',12,'#99aabb');
 }
 /* ---------- Core の選手ライブラリ（lib）を描く ---------- */
@@ -1444,7 +1457,7 @@ function viewLibrary(v){
 function viewLibDetailOwn(v,base){
   const C=Core,p=C.effPlayer(base),pr=C.progOf(base.name);
   v.text(492,TY(116,19),p.name,19,'#ffffff',{bold:true});
-  v.text(492,TY(140,14),'出身 '+C.SCHOOL_OF[p.name]+'　'+p.pos+'／'+p.elem+'属性　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=C.LV_MAX?'MAX':C.expNeed(pr.lv)),14,'#99aabb');
+  v.text(492,TY(140,14),'出身 '+C.SCHOOL_OF[p.name]+'　'+p.pos+'／'+p.elem+'属性　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=C.LV_MAX?'MAX':C.expNeed(pr.lv))+'　成長 '+C.growthTypeOf(base.name),14,'#99aabb');
   v.text(492,TY(162,14),'役割：'+C.ROLE_LABEL[C.roleOf(p.name)]+'（Zで変更：未登録→控え→スタメン→リベロ→未登録）',14,'#99aabb');
   C.STAT_NAMES.forEach((lb,i)=>{
     const x=492+(i%4)*100,y=192+Math.floor(i/4)*28;
@@ -1592,6 +1605,9 @@ class TitleScene extends Phaser.Scene{
       if(i===Core.titleSel)v.rect(330,y-30,300,42,0x33507e,1);
       v.text(480,TY(y,22),(i===Core.titleSel?'▶ ':'')+s,22,(i===1&&!Core.validSave())?'#666677':'#ffffff',{ox:0.5});
     });
+    /* v1.1: 名鑑コレクションの達成率と現在の称号 */
+    const dbTotal=Object.keys(Core.PLAYER_DB).length, libN=(Core.G.library||[]).length;
+    v.text(480,TY(300,12),'選手名鑑：'+libN+'/'+dbTotal+'人（'+(dbTotal?Math.floor(libN/dbTotal*100):0)+'%）'+((Core.G.titles&&Core.G.titles.length)?'　称号：'+Core.G.titles[Core.G.titles.length-1]:''),12,'#99aabb',{ox:0.5});
     if(Core.titleWarn)v.text(480,TY(486,15),'セーブデータがあります。もう一度「はじめから」を選ぶと上書きして開始します',15,'#ff9a9a',{ox:0.5});
     v.end();
     if(Core.scene==='explore')this.scene.start('Explore');
@@ -1640,8 +1656,11 @@ class ExploreScene extends Phaser.Scene{
       }
     }
     /* --- ワープの行き先ラベル（Core v1.0.2 の表示に合わせる。
-       ラベル全体がマップ内に収まるよう、Core と同じく左右位置をクランプする） --- */
-    for(const w of (map.warps||[])){
+       ラベル全体がマップ内に収まるよう、Core と同じく左右位置をクランプする。
+       v1.1: ゲートは3タイル幅になったので、行き先ごとに中央の1タイルだけに描く） --- */
+    const warpGroups={};
+    for(const w of (map.warps||[]))(warpGroups[w.to]=warpGroups[w.to]||[]).push(w);
+    for(const w of Object.values(warpGroups).map(ws=>ws[Math.floor(ws.length/2)])){
       const dest=C.MAPS[w.to];if(!dest)continue;
       const lt=this.add.text(w.x*32+16,w.y*32-17,'→ '+dest.name,{fontFamily:FONT,fontSize:'11px',color:'#ffd76a',
         backgroundColor:'rgba(8,12,28,.85)',padding:{x:5,y:1}}).setOrigin(0.5,0).setDepth(62);
@@ -2303,11 +2322,17 @@ class MatchScene extends Phaser.Scene{
       const pk=Math.min(1,this.scorePop.t/0.85);
       v.text(this.scorePop.side==='A'?446:514,58-pk*20,'+1',20,'#ffd76a',{bold:true,ox:0.5,alpha:1-pk});
     }
-    v.text(736,TY(32,12),'● '+(M.serve==='A'?M.myName:M.oppName)+'サーブ',12,'#ffd76a');
+    /* v1.1: サーブ表示は左上のピルへ（スコアボードの右端に半分隠れる問題の解消。
+       カットイン中は隠す） */
+    if(!M.cutin){v.rect(8,8,170,24,0x080c1c,0.88);v.text(14,TY(25,12),'● '+(M.serve==='A'?M.myName:M.oppName)+'サーブ',12,'#ffd76a');}
     /* メッセージバー（試合結果の表示中は結果文をパネル側に任せ、
        バーには描かない。「探索に戻る」メニューとの重なりを避ける） */
     v.rect(180,456,600,42,0x080c1c,0.88);
     if(!(M.over&&M.result))v.text(192,464,wrapJa(M.msg||'',566,'15px sans-serif'),15,'#ffffff',{ls:3});
+    /* v1.1: 対決値の読み方（差の符号とサーブのパス目安）を右下に常時表示 */
+    v.text(790,460,'対決の差＝攻撃−守備',10,'#99aabb');
+    v.text(790,476,'サーブ: 差-10以下 Aパス',10,'#99aabb');
+    v.text(790,492,'B:±9 C:+10〜 エース:+20〜',10,'#99aabb');
     /* チームパネル（自チームのコート内選手 FP/TP） */
     v.rect(6,452,168,84,0x080c1c,0.88);
     M.A.court.forEach((p,i)=>{
@@ -2323,8 +2348,8 @@ class MatchScene extends Phaser.Scene{
     for(const t of [M.A,M.H])for(const p of t.court){
       if(C.isAwake(p))v.stroke(p.x-25,p.y-45,50,66,C16(C.ELEM[p.elem].c),2);
     }
-    /* アクターパネル（コマンド選択中の選手） */
-    if(M.actor&&(C.menu||M.phase==='defendMenu')){
+    /* アクターパネル（コマンド選択中の選手。結果表示中は出さない） */
+    if(!M.over&&M.actor&&(C.menu||M.phase==='defendMenu')){
       const p=M.actor,col=C16(C.ELEM[p.elem].c);
       v.rect(6,120,240,170,0x080c1c,0.94);v.stroke(6,120,240,170,col,2);
       v.text(16,TY(146,16),p.name,16,'#ffffff',{bold:true});
@@ -2345,13 +2370,19 @@ class MatchScene extends Phaser.Scene{
       v.text(480,TY(161,20),M.myName+' '+M.scoreA+' ― '+M.scoreH+' '+M.oppName,20,'#ffffff',{ox:0.5});
       v.text(480,TY(200,17),(r.rk||r.yk||r.buhi)?('ねっけつP +'+r.rk+'　ゆうじょうP +'+r.yk+(r.buhi?'　部費 +'+r.buhi+'円':'')):'報酬なし（また挑戦しよう）',17,'#ffd76a',{ox:0.5});
       if(r.expSummary)v.text(480,TY(228,14),r.expSummary,14,'#ccffee',{ox:0.5});
+      /* v1.1: MVP と試合スタッツ上位3人 */
+      if(r.mvp)v.text(480,TY(254,15),'MVP：'+r.mvp.short+'（得点'+r.mvp.pts+'）',15,'#ffd76a',{bold:true,ox:0.5});
+      (r.stats||[]).slice(0,3).forEach((s,i)=>{
+        const b=C.baseOf(s.name);
+        v.text(480,TY(276+i*18,12),(b?b.short:s.name)+'　得点'+s.pts+'（スパイク'+s.spike+'・ブロック'+s.block+'・エース'+s.ace+'）ディグ'+s.dig,12,'#ccffee',{ox:0.5});
+      });
       const note=r.note?r.note:(M.mini?(r.win?'ミニバトル勝利！':'負けてもゲームオーバーにはならない。再戦可能')
         :(r.win?M.oppName+'に勝利！ 次の相手へ向けて特訓しよう':'再挑戦は凪から。作戦ヒントか補助モードが選べる'));
       const noteLines=wrapJa(note,464,'12px sans-serif').split('\n').length;
       const noteTop=PB-8-(noteLines*16-4);
-      const maxUps=Math.max(0,Math.min(6,Math.floor((noteTop-262)/22)+1));
+      const maxUps=Math.max(0,Math.min(6,Math.floor((noteTop-340)/22)+1));
       (r.levelUps||[]).slice(0,maxUps).forEach((u,i)=>{
-        v.text(480,TY(256+i*22,15),'Lvアップ！ '+u.short+' → Lv'+u.lv+(u.techs.length?'　新技「'+u.techs.join('」「')+'」習得':''),15,'#ffd76a',{ox:0.5});
+        v.text(480,TY(334+i*22,15),'Lvアップ！ '+u.short+' → Lv'+u.lv+(u.techs.length?'　新技「'+u.techs.join('」「')+'」習得':''),15,'#ffd76a',{ox:0.5});
       });
       v.text(480,noteTop,wrapJa(note,464,'12px sans-serif'),12,'#99aabb',{ox:0.5,ls:4});
     }

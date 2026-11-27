@@ -1847,6 +1847,7 @@ function doScout(cand){
   if(cand.junior){if(!G.junior)G.junior={};G.junior[cand.name]=true;}
   progOf(cand.name);
   if(G.entry.length<ENTRY_MAX)G.entry.push(cand.name); /* 空きがあればエントリーにも自動で入れる */
+  if(MILESTONES.some(m=>G.library.length>=m.n&&!(G.msGiven&&G.msGiven[m.n])))pendingMilestone=true;
   saveGame();
   return {ok:true,msg:cand.name+' が仲間になった！（ゆうじょうP -'+cand.cost+'）'};
 }
@@ -2130,7 +2131,16 @@ function buyEquip(name,item){
 
 /* 実効能力値 = 基礎 + レベル成長 + 特訓 + 装備（合計99キャップ、§0）。
    成長は小数配分（+1.2/Lv 等）のため切捨てて返す（§3.2：内部小数・表示切捨て） */
-function effSt(base,i){const pr=progOf(base.name);return Math.min(99,Math.floor(base.st[i]+GROWTH[base.pos][i]*(pr.lv-1)+pr.train[i]+equipBonus(base.name,i)));}
+/* 成長タイプ（system-design.md §3.2、v1.1で実装）: 名前のハッシュで決定的に
+   早熟／普通／晩成 を割り当てる（セーブへの保存は不要）。
+   係数はレベル帯ごと: 早熟＝Lv2-10 ×1.4／Lv11-20 ×1.0／Lv21-30 ×0.5、
+   晩成＝Lv2-10 ×0.6／Lv11-20 ×1.0／Lv21-30 ×1.5、普通は全帯 ×1.0。
+   成長量は「到達レベルまでの係数の累積 × ポジション別配分」で、普通タイプは
+   従来の (Lv-1) と一致する（旧セーブ・旧バランスと互換） */
+function growthTypeOf(name){let h=0;for(let i=0;i<name.length;i++)h=(h*31+name.charCodeAt(i))>>>0;return ['早熟','普通','晩成'][h%3];}
+function growthFactor(type,lv){if(type==='早熟')return lv<=10?1.4:lv<=20?1.0:0.5;if(type==='晩成')return lv<=10?0.6:lv<=20?1.0:1.5;return 1.0;}
+function growthCum(name,lv){const t=growthTypeOf(name);let s=0;for(let k=2;k<=lv;k++)s+=growthFactor(t,k);return s;}
+function effSt(base,i){const pr=progOf(base.name);return Math.min(99,Math.floor(base.st[i]+GROWTH[base.pos][i]*growthCum(base.name,pr.lv)+pr.train[i]+equipBonus(base.name,i)));}
 /* 伝統技（unlock=-1）の解放判定（フェーズ4-B）。
    コア8人＝決勝前イベント「再建の誓い」（G.flags.tradition）で一斉解放。
    引き抜き組4人＝各人の加入イベント（G.flags['joined_'+名前]）で解放する */
@@ -2277,6 +2287,9 @@ function ensureSave(){
   if(!G.comboEv)G.comboEv={}; /* v0.13: 合体技のミニイベント視聴状態（技名→true） */
   if(!G.junior)G.junior={}; /* v0.12: 中学生の有望株の仮登録（入学＝クリア後に解禁） */
   if(!G.equip)G.equip={}; /* v0.10: 装備の所持・装備状態（§8.2） */
+  if(!G.career)G.career={}; /* v1.1: 選手の通算成績（名前→{matches,pts,spike,block,ace,dig,wins}） */
+  if(!G.titles)G.titles=[]; /* v1.1: 名鑑コレクションの節目で得た称号 */
+  if(!G.msGiven)G.msGiven={}; /* v1.1: 節目ボーナスの付与済み記録（人数→true） */
   for(const p of ASANAGI)progOf(p.name);
   for(const n of G.library)progOf(n);
 }
@@ -2322,9 +2335,17 @@ cv.addEventListener('pointerdown',e=>{
 
 /* ---------- 汎用メニュー ---------- */
 let menu=null; // {x,y,w,items:[{label,sub,disabled}],sel,onPick}
-function openMenu(x,y,items,onPick){menu={x,y,w:300,items,sel:0,onPick};}
+function openMenu(x,y,items,onPick){menu={x,y,w:300,items,sel:0,onPick};
+  /* v1.1: 会話の選択肢メニューは、会話送りのZ連打で先頭項目が誤爆しないよう
+     開いてから約9フレームはキー確定を受け付けない（カーソル移動とクリックは可） */
+  if(typeof dlg!=='undefined'&&dlg&&dlg.choices)menu.grace=9;}
 function menuUpdate(){
   if(!menu)return;
+  /* v1.1: _cancel 項目を持つメニューは X でもキャンセルできる */
+  if(hit('x','X')){
+    const ci=menu.items.findIndex(it=>it._cancel);
+    if(ci>=0){const cb=menu.onPick;menu=null;cb(ci);return;}
+  }
   if(hit('ArrowUp','w','W'))menu.sel=(menu.sel+menu.items.length-1)%menu.items.length;
   if(hit('ArrowDown','s','S'))menu.sel=(menu.sel+1)%menu.items.length;
   if(mouseClick){
@@ -2336,6 +2357,8 @@ function menuUpdate(){
     }
     mouseClick=null;
   }
+  /* v1.1: 入力猶予中はキー確定だけを飲み込む（クリック確定は通常通り） */
+  if(menu.grace>0){menu.grace--;hit('z','Z','Enter',' ');return;}
   if(hit('z','Z','Enter',' ')){
     if(!menu.items[menu.sel].disabled){const cb=menu.onPick,idx=menu.sel;menu=null;cb(idx);}
   }
@@ -2345,13 +2368,23 @@ function drawMenu(){
   const h=menu.items.length*34+10;
   ctx.fillStyle='rgba(10,16,34,.92)';ctx.strokeStyle='#8fb7ff';ctx.lineWidth=2;
   ctx.fillRect(menu.x,menu.y,menu.w,h);ctx.strokeRect(menu.x,menu.y,menu.w,h);
-  ctx.font='17px sans-serif';ctx.textBaseline='middle';
+  ctx.textBaseline='middle';
   menu.items.forEach((it,i)=>{
     const iy=menu.y+5+i*34;
     if(i===menu.sel){ctx.fillStyle='#33507e';ctx.fillRect(menu.x+4,iy,menu.w-8,30);}
+    const label=(i===menu.sel?'▶ ':'　')+it.label;
+    let subW=0;
+    if(it.sub){ctx.font='12px sans-serif';subW=ctx.measureText(it.sub).width;}
+    /* v1.1: ラベルが sub（TPコスト等）に重ならないよう、残り幅に合わせて
+       フォントを段階縮小し、それでも収まらなければ末尾を省略する */
+    let fs=17;ctx.font=fs+'px sans-serif';
+    const avail=menu.w-20-(subW?subW+8:0);
+    while(fs>11&&ctx.measureText(label).width>avail){fs-=2;ctx.font=fs+'px sans-serif';}
+    let txt=label;
+    if(ctx.measureText(txt).width>avail){while(txt.length>1&&ctx.measureText(txt+'…').width>avail)txt=txt.slice(0,-1);txt+='…';}
     ctx.fillStyle=it.disabled?'#667':'#fff';
-    ctx.fillText((i===menu.sel?'▶ ':'　')+it.label,menu.x+10,iy+15);
-    if(it.sub){ctx.fillStyle='#9ab';ctx.font='12px sans-serif';ctx.fillText(it.sub,menu.x+menu.w-ctx.measureText(it.sub).width-10,iy+15);ctx.font='17px sans-serif';}
+    ctx.fillText(txt,menu.x+10,iy+15);
+    if(it.sub){ctx.fillStyle='#9ab';ctx.font='12px sans-serif';ctx.fillText(it.sub,menu.x+menu.w-subW-10,iy+15);}
   });
   ctx.textBaseline='alphabetic';
 }
@@ -2359,7 +2392,8 @@ function drawMenu(){
 /* ---------- 会話 ---------- */
 let dlg=null; // {lines:[{name,text}],i,onEnd,choices}
 let dlgTag=null; /* 会話シーンの場面名（序章のみ使用。再生中は目標HUDの代わりに出す。v1.0.2） */
-function startDialog(lines,onEnd,tag){dlg={lines,i:0,onEnd};dlgTag=tag||null;}
+let pendingGuardId=null; /* v1.1: 次に始まる会話へ「終了後に同じNPCへ再話しかけしない」ガードを引き継ぐ */
+function startDialog(lines,onEnd,tag){dlg={lines,i:0,onEnd};dlgTag=tag||null;if(pendingGuardId){dlg.guardId=pendingGuardId;pendingGuardId=null;}}
 /* 序章「鍵開けの朝」の再生（v1.0.1）: 新規開始直後と、物語モードで
    未読のセーブを読み込んだ時に自動再生する。凪に話しかけた時の
    保険経路からも同じ入口を使う。再生完了で introDone を立てて保存する */
@@ -2369,7 +2403,11 @@ function dialogUpdate(){
   if(dlg.choices){menuUpdate();return;}
   if(hit('z','Z','Enter',' ')||mouseClick){
     mouseClick=null;dlg.i++;
-    if(dlg.i>=dlg.lines.length){const cb=dlg.onEnd;dlg=null;dlgTag=null;if(cb)cb();}
+    if(dlg.i>=dlg.lines.length){const cb=dlg.onEnd;const gid=dlg.guardId;dlg=null;dlgTag=null;if(cb)cb();
+      /* v1.1: 加入イベント等の会話が終わったら、同じNPCへの再話しかけを
+         少しだけ（0.6秒／16px移動まで）止める。会話送りの余分なZで
+         同じ会話が開き直す事故を防ぐため */
+      if(gid&&!dlg)talkGuard={id:gid,t:0.6,x:player.x,y:player.y};}
   }
 }
 function drawDialog(){
@@ -2417,9 +2455,9 @@ const SCHOOL_TILES=[
 "T..F....P............PP..........P...T",
 "T......TP............PP..........P...T",
 "T.......P.........CCCCCCCC.......P...T",
-"T..F....P.........CCCCCCCC.......P...T",
+"T..F....P.........CCCCCCCC.......P...W",
 "T.......P.........CCCCCCCCPPPPPPPPPPPW",
-"T.......P.........CCCCCCCC.......P...T",
+"T.......P.........CCCCCCCC.......P...W",
 "T...T...P.........CCCCCCCC.......P...T",
 "T.......P.........CCCCCCCC.......P...T",
 "TPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPT",
@@ -2440,9 +2478,9 @@ const STREET_TILES=[
 "T.................F..................T",
 "T...................T................T",
 "TPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPT",
-"T........F...........................T",
+"W........F...........................W",
 "W...............PPPPPPPP.............W",
-"T...............PCCCCCCP.............T",
+"W...............PCCCCCCP.............W",
 "T...............PCCCCCCP.............T",
 "T...............PPPPPPPP.............T",
 "T....................F...............T",
@@ -2451,7 +2489,7 @@ const STREET_TILES=[
 "T.......................BBBBBBB......T",
 "T.......................BBBDBBB......T",
 "T....................................T",
-"TTTTTTTTTTTTTTTTTTTWTTTTTTTTTTTTTTTTTT",
+"TTTTTTTTTTTTTTTTTTWWWTTTTTTTTTTTTTTTTT",
 ];
 /* 公園（マップ追加）: 芝生と木立の中に、北側へ壁トスの壁（B）と
    中央南に砂のコート（C）。西端（0,10）が商店街へのゲート */
@@ -2465,9 +2503,9 @@ const PARK_TILES=[
 "T..................PP................T",
 "T....T.............PP..........T.....T",
 "T..................PP................T",
-"T..F...............PP.....F..........T",
+"W..F...............PP.....F..........T",
 "WPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPT",
-"T..................PP................T",
+"W..................PP................T",
 "T.............PCCCCCCCCP.............T",
 "T.............PCCCCCCCCP.............T",
 "T.............PCCCCCCCCP.............T",
@@ -2501,7 +2539,7 @@ const STATION_TILES=[
 "T....................................T",
 "T..T.................................T",
 "T....................................T",
-"TTTTTTTTTTTTTTTTTTTWTTTTTTTTTTTTTTTTTT",
+"TTTTTTTTTTTTTTTTTTWWWTTTTTTTTTTTTTTTTT",
 ];
 function mobNpc(id,team,name,x,y,hair,uni){return {id,team:team,mob:team,name,x:x*TILE,y:y*TILE,hair,uni};}
 /* 街NPC（v0.12、mobs.md の街モブNPC20人）。town:true で会話専用NPCとして扱い、
@@ -2511,7 +2549,7 @@ function townNpc(id,name,x,y,hair,uni,yj){return {id,name,x:x*TILE,y:y*TILE,hair
 const MAPS={
  school:{name:'朝凪学園',label:'朝凪学園 体育館',labelX:17*TILE,labelY:2*TILE-6,ground:'#69a85e',path:'#b9a888',
   tiles:SCHOOL_TILES,
-  warps:[{x:37,y:10,to:'street',sx:1,sy:10}],
+  warps:[{x:37,y:9,to:'street',sx:1,sy:10},{x:37,y:10,to:'street',sx:1,sy:10},{x:37,y:11,to:'street',sx:1,sy:10}],
   npcs:[
    {id:'nagi',name:'早瀬 凪',x:19*TILE,y:10*TILE,hair:'#26355e',uni:'#bfe3ff'},
    {id:'kengo',name:'石動 健吾',x:24*TILE,y:11*TILE,hair:'#1c1c1c',uni:'#bfe3ff'},
@@ -2521,9 +2559,9 @@ const MAPS={
    {id:'mizuki',name:'日向 美月',x:8*TILE,y:18*TILE,hair:'#e07b28',uni:'#bfe3ff'},
    {id:'seo',name:'瀬尾 千鶴',x:17*TILE,y:6*TILE,hair:'#4a2c3a',uni:'#cbb'},
    // ミニバトルモブ（校内）: 青葉台一年生トリオ（コート東）
-   mobNpc('aoba1','aoba','ハルト',30,8,'#b0502a','#cfe8ff'),
-   mobNpc('aoba2','aoba','ミオ',30,11,'#3a6e8e','#cfe8ff'),
-   mobNpc('aoba3','aoba','ソウタ',28,13,'#5e4a2a','#cfe8ff'),
+   mobNpc('aoba1','aoba','ハルト',21,8,'#b0502a','#cfe8ff'),
+   mobNpc('aoba2','aoba','ミオ',21,12,'#3a6e8e','#cfe8ff'),
+   mobNpc('aoba3','aoba','ソウタ',19,13,'#5e4a2a','#cfe8ff'),
    // 応援団バレー班（校庭西）
    mobNpc('ouendan1','ouendan','テツヤ',5,10,'#8e2a1e','#ffb0a0'),
    mobNpc('ouendan2','ouendan','メグミ',3,11,'#6e3a5e','#ffb0a0'),
@@ -2567,9 +2605,9 @@ const MAPS={
   ]},
  street:{name:'朝凪商店街',label:'朝凪商店街',labelX:14*TILE,labelY:19*TILE+22,ground:'#8d8d96',path:'#a8a29a',
   tiles:STREET_TILES,
-  warps:[{x:0,y:10,to:'school',sx:36,sy:10},
-   {x:37,y:10,to:'park',sx:1,sy:10},
-   {x:19,y:20,to:'station',sx:19,sy:19}],
+  warps:[{x:0,y:9,to:'school',sx:36,sy:10},{x:0,y:10,to:'school',sx:36,sy:10},{x:0,y:11,to:'school',sx:36,sy:10},
+   {x:37,y:9,to:'park',sx:1,sy:10},{x:37,y:10,to:'park',sx:1,sy:10},{x:37,y:11,to:'park',sx:1,sy:10},
+   {x:18,y:20,to:'station',sx:19,sy:19},{x:19,y:20,to:'station',sx:19,sy:19},{x:20,y:20,to:'station',sx:19,sy:19}],
   npcs:[
    // 商店街アーケードスターズ（中央北）
    mobNpc('arcade1','arcade','ダイキ',11,6,'#8e5a2a','#ffd9a0'),
@@ -2591,9 +2629,9 @@ const MAPS={
    mobNpc('beach2','beach','ヒナ',31,15,'#7a5e2c','#ffe0a0'),
    mobNpc('beach3','beach','シオリ',32,18,'#a85e3a','#ffe0a0'),
    // 留学生チーム（東端）
-   mobNpc('exchange1','exchange','ルーカス',35,7,'#c8a83a','#e0b0d8'),
-   mobNpc('exchange2','exchange','エマ',33,9,'#8e6a4a','#e0b0d8'),
-   mobNpc('exchange3','exchange','ミンジュン',35,10,'#2c3a4a','#e0b0d8'),
+   mobNpc('exchange1','exchange','ルーカス',34,6,'#c8a83a','#e0b0d8'),
+   mobNpc('exchange2','exchange','エマ',32,7,'#8e6a4a','#e0b0d8'),
+   mobNpc('exchange3','exchange','ミンジュン',35,8,'#2c3a4a','#e0b0d8'),
    // ランニング（東・広場南）
    mobNpc('running1','running','ハヤト',30,11,'#2a4a6e','#a0b8e8'),
    mobNpc('running2','running','アオイ',32,12,'#c25e5e','#a0b8e8'),
@@ -2632,7 +2670,7 @@ const MAPS={
     周囲に他のNPCを置かない。商店街からモブ4チーム＋街NPC2人を移して分散 */
  park:{name:'朝凪公園',label:'朝凪公園',labelX:18*TILE,labelY:19*TILE+22,ground:'#5f9e52',path:'#c9b586',
   tiles:PARK_TILES,
-  warps:[{x:0,y:10,to:'street',sx:36,sy:10}],
+  warps:[{x:0,y:9,to:'street',sx:36,sy:10},{x:0,y:10,to:'street',sx:36,sy:10},{x:0,y:11,to:'street',sx:36,sy:10}],
   npcs:[
    /* 若林 湊: 壁トスの壁（北・B）の前。加入イベントの台本どおり「公園の壁打ち場」 */
    {id:'minato',name:'若林 湊',x:19*TILE,y:4*TILE,hair:'#2c5e3a',uni:'#cfe8ff'},
@@ -2660,7 +2698,7 @@ const MAPS={
  /* 駅前: 駅舎とロータリーの広場。商店街からモブ3チーム＋街NPC4人を移して分散 */
  station:{name:'朝凪駅前',label:'朝凪駅前',labelX:14*TILE,labelY:19*TILE+22,ground:'#83838e',path:'#a8a29a',
   tiles:STATION_TILES,
-  warps:[{x:19,y:20,to:'street',sx:19,sy:19}],
+  warps:[{x:18,y:20,to:'street',sx:19,sy:19},{x:19,y:20,to:'street',sx:19,sy:19},{x:20,y:20,to:'street',sx:19,sy:19}],
   npcs:[
    // 駅前チーム（駅舎前・西）
    mobNpc('ekimae21','ekimae2','ユウキ',12,6,'#3a4a3a','#b0c8e8'),
@@ -2691,6 +2729,9 @@ function solid(tx,ty){
 }
 const player={x:8*TILE,y:13*TILE,dir:'down',anim:0};
 let contactArm=true; // シンボル接触でミニバトルを発火させる武装状態（離れると再武装）
+let declinedMobs=new Set(); /* v1.1: 遭遇を断ったモブチームは、そのマップにいる間は接触で再発火しない（話しかけは可能） */
+let talkGuard={id:null,t:0,x:0,y:0}; /* v1.1: 加入イベント会話の終了直後、同じNPCへの誤再話しかけ防止ガード */
+let pendingMilestone=false; /* v1.1: 名鑑の節目到達を、会話が終わってから通知するための保留フラグ */
 function npcLines(id){
   switch(id){
     case 'sara':return [{name:'大磯 紗良',text:'今日の相手、レフトの決定率が下がってます。疲労だと思います'}];
@@ -2864,10 +2905,28 @@ function eventNpcIds(){
 function addMember(name){
   if(!G.library.includes(name)){G.library.push(name);progOf(name);}
   if(G.entry.length<ENTRY_MAX&&!G.entry.includes(name))G.entry.push(name);
+  if(MILESTONES.some(m=>G.library.length>=m.n&&!(G.msGiven&&G.msGiven[m.n])))pendingMilestone=true;
   saveGame();
 }
+/* 名鑑コレクションの節目（v1.1）: 所持人数が節目に届いたら称号と
+   ゆうじょうPボーナスを付与し、会話で通知する。通知は加入会話と重ならない
+   よう、exploreUpdate が空いたタイミングで pendingMilestone 経由で呼ぶ */
+const MILESTONES=[{n:50,title:'街の顔',yj:50},{n:100,title:'名スカウト',yj:100},{n:150,title:'人脈の達人',yj:150},{n:200,title:'伝説の伯楽',yj:200},{n:250,title:'完全名鑑',yj:300}];
+function checkMilestones(){
+  if(!G.msGiven)G.msGiven={};if(!G.titles)G.titles=[];
+  const lines=[];
+  for(const m of MILESTONES){
+    if(G.library.length>=m.n&&!G.msGiven[m.n]){
+      G.msGiven[m.n]=true;G.titles.push(m.title);G.yuujou+=m.yj;
+      lines.push({name:'',text:'選手名鑑が '+m.n+' 人に到達！　称号「'+m.title+'」を獲得し、ゆうじょうP +'+m.yj+' を得た！'});
+    }
+  }
+  if(lines.length){saveGame();startDialog(lines);}
+}
 /* 加入シーンの再生（末尾に加入通知を付け、終わったらライブラリへ追加する） */
+const JOIN_GUARD={'赤城 剛太':'gota','若林 湊':'minato','大磯 紗良':'sara','速川 蓮':'ren','日向 美月':'mizuki'};
 function joinScene(name,lines,after){
+  if(JOIN_GUARD[name])pendingGuardId=JOIN_GUARD[name];
   startDialog(lines.concat([{name:'',text:'―― '+name+' が仲間になった！（選手ライブラリに追加）'}]),
     ()=>{addMember(name);if(after)after();});
 }
@@ -2884,6 +2943,7 @@ const GOTA_TEAM={id:'gota',name:'剛太＋助っ人2人',reward:{nk:10,yj:6},exp
  winLines:[{name:'赤城 剛太',text:'……拾われ続けるバレーは、初めてだった'}],
  loseLines:[{name:'赤城 剛太',text:'はっ、3人じゃこの程度か。……まあ、悪くはなかったけどよ'}]};
 function gotaEvent(){
+  pendingGuardId='gota';
   startDialog([
    {name:'赤城 剛太',text:'断る。弱い部に入っても、強くなれねえ'},
    {name:'高嶺 陽翔',text:'じゃあ勝負だ。俺たち3人と、お前＋助っ人2人。ミニバトル、1点先取。俺たちが勝ったら、話だけでも聞け'},
@@ -2969,19 +3029,19 @@ function storyNpcEvent(id){
     case 'minato':
       if(G.library.includes('若林 湊'))return false;
       if(step==='minato'){minatoEvent();return true;}
-      startDialog([{name:'',text:'（壁に向かって、一人でトスを繰り返している。何本上げても、軌道がぶれない）'}]);return true;
+      pendingGuardId='minato';startDialog([{name:'',text:'（壁に向かって、一人でトスを繰り返している。何本上げても、軌道がぶれない）'}]);return true;
     case 'sara':
       if(G.library.includes('大磯 紗良'))return false;
       if(step==='sara'){saraEvent();return true;}
-      startDialog([{name:'',text:'（大磯紗良。帰宅部だが、体育の授業では妙に目立つ選手だ）'}]);return true;
+      pendingGuardId='sara';startDialog([{name:'',text:'（大磯紗良。帰宅部だが、体育の授業では妙に目立つ選手だ）'}]);return true;
     case 'ren':
       if(G.library.includes('速川 蓮'))return false;
       if(step==='ren'){renEvent();return true;}
-      startDialog([{name:'速川 蓮',text:'凪先輩のレシーブ練習、今日も付き合うんです！　……あ、部員じゃないけど、混ざってます！'}]);return true;
+      pendingGuardId='ren';startDialog([{name:'速川 蓮',text:'凪先輩のレシーブ練習、今日も付き合うんです！　……あ、部員じゃないけど、混ざってます！'}]);return true;
     case 'mizuki':
       if(G.library.includes('日向 美月'))return false;
       if(step==='mizuki'){mizukiEvent();return true;}
-      startDialog([{name:'日向 美月',text:'サーブ対決の的当て、練習中です！　……バレー部の勧誘ですか？'}]);return true;
+      pendingGuardId='mizuki';startDialog([{name:'日向 美月',text:'サーブ対決の的当て、練習中です！　……バレー部の勧誘ですか？'}]);return true;
   }
   return false;
 }
@@ -3217,11 +3277,21 @@ function spotEncounter(spot){
     openMenu(520,300,[{label:'特訓する'},{label:'やめておく'}],idx=>{dlg=null;if(idx===0)openTrainPlayers(spot);});
   });
 }
+/* 特訓できない理由の短縮表示（v1.1）。理由と必要コストを sub に出す */
+function trainNgShort(reason,cost){
+  if(reason.indexOf('累計上限')>=0)return '累計上限（必要'+cost+'P）';
+  if(reason.indexOf('上限（99）')>=0)return '能力上限99';
+  if(reason.indexOf('章ではもう伸ばせない')>=0)return '今章は上限（必要'+cost+'P）';
+  if(reason.indexOf('特訓回数の上限')>=0)return '今章の回数上限';
+  if(reason.indexOf('チーム全体')>=0)return 'チーム全体の上限';
+  if(reason.indexOf('足りない')>=0)return 'P不足（必要'+cost+'P）';
+  return reason;
+}
 function openTrainPlayers(spot){
   const items=libPlayers().map(p=>{
     const chk=trainCheck(p,spot);
     return {label:p.short+'（'+STAT_NAMES[spot.stat]+' '+effSt(p,spot.stat)+'）',
-      sub:chk.ok?('ねっけつP '+chk.cost):'不可',disabled:!chk.ok,_p:p};
+      sub:chk.ok?('ねっけつP '+chk.cost):trainNgShort(chk.reason,trainCost(p,spot)),disabled:!chk.ok,_p:p};
   });
   items.push({label:'やめる',_cancel:true});
   dlg={lines:[],i:0,choices:true};
@@ -3232,7 +3302,7 @@ function openTrainPlayers(spot){
     dlg={lines:[],i:0,choices:true};
     openMenu(440,300,[
       {label:base.short+'の'+STAT_NAMES[spot.stat]+'を特訓（ねっけつP '+chk.cost+'）'},
-      {label:'やめる'},
+      {label:'やめる',_cancel:true},
     ],j=>{
       dlg=null;if(j!==0)return;
       const r=doTrain(base,spot);
@@ -3368,6 +3438,10 @@ function exploreUpdate(dt){
   }
   if(dlg){dialogUpdate();return;}
   if(menu){menuUpdate();return;}
+  /* v1.1: 名鑑の節目通知は、加入会話などが終わったタイミングで差し込む */
+  if(pendingMilestone){pendingMilestone=false;checkMilestones();if(dlg)return;}
+  /* v1.1: 再話しかけガードの減衰（時間経過か、16px以上動いたら解除） */
+  if(talkGuard.id){talkGuard.t-=dt;if(talkGuard.t<=0||Math.abs(player.x-talkGuard.x)>=16||Math.abs(player.y-talkGuard.y)>=16)talkGuard.id=null;}
   if(maybeChapterEvent())return; /* フェーズ4-B: 章イベントの差し込み（物語モードのみ） */
   if(checkRouteInvite())return; /* フェーズ5-A: ルート3の招待状（クリア後、全モード共通） */
   if(hit('x','X')){profileOpen=true;return;}
@@ -3379,23 +3453,35 @@ function exploreUpdate(dt){
     const sp=130*dt;
     const nx=player.x+v.x*sp, ny=player.y+v.y*sp;
     const box=(x,y)=>solid(Math.floor((x+8)/TILE),Math.floor((y+10)/TILE))||solid(Math.floor((x+24)/TILE),Math.floor((y+10)/TILE))||solid(Math.floor((x+8)/TILE),Math.floor((y+30)/TILE))||solid(Math.floor((x+24)/TILE),Math.floor((y+30)/TILE));
-    if(!box(nx,player.y))player.x=nx;
-    if(!box(player.x,ny))player.y=ny;
-    // NPCとの衝突（簡易）
-    for(const n of curMap().npcs){
-      if(Math.abs(player.x-n.x)<24&&Math.abs(player.y-n.y)<24){player.x-=v.x*sp;player.y-=v.y*sp;}
-    }
-    // マップ移動ゲート
+    /* NPCとの衝突（v1.1: 軸分離＋脱出許可）。候補位置がNPCの24px圏内へ新たに
+       入る移動だけを軸ごとに止める。すでに重なっている場合は、重なりが深く
+       ならない移動（脱出方向）を許可するので、ワープ到着地点などで
+       「押しても1ピクセルも動かない」状態にならない */
+    const npcBlock=(x,y)=>{
+      for(const n of curMap().npcs){
+        const inCand=Math.abs(x-n.x)<24&&Math.abs(y-n.y)<24;
+        if(!inCand)continue;
+        const inNow=Math.abs(player.x-n.x)<24&&Math.abs(player.y-n.y)<24;
+        if(!inNow)return true;
+        const dNow=Math.max(Math.abs(player.x-n.x),Math.abs(player.y-n.y));
+        const dCand=Math.max(Math.abs(x-n.x),Math.abs(y-n.y));
+        if(dCand<dNow)return true;
+      }
+      return false;
+    };
+    if(!box(nx,player.y)&&!npcBlock(nx,player.y))player.x=nx;
+    if(!box(player.x,ny)&&!npcBlock(player.x,ny))player.y=ny;
+    // マップ移動ゲート（v1.1: ゲートは3タイル幅。warps の同 to 宛が3件並ぶ）
     const ptx=Math.floor((player.x+16)/TILE),pty=Math.floor((player.y+16)/TILE);
     for(const w of curMap().warps){
-      if(w.x===ptx&&w.y===pty){curMapId=w.to;player.x=w.sx*TILE;player.y=w.sy*TILE;contactArm=false;break;}
+      if(w.x===ptx&&w.y===pty){curMapId=w.to;player.x=w.sx*TILE;player.y=w.sy*TILE;contactArm=false;declinedMobs.clear();break;}
     }
-    // モブとのシンボル接触 → ミニバトル挑発
+    // モブとのシンボル接触 → ミニバトル挑発（断った相手はこのマップでは再発火しない）
     let nearMob=false;
     for(const n of curMap().npcs){
       if(!n.mob)continue;
       if(Math.hypot(player.x-n.x,player.y-n.y)<44)nearMob=true;
-      if(contactArm&&Math.abs(player.x-n.x)<26&&Math.abs(player.y-n.y)<26){mobEncounter(n.mob);break;}
+      if(contactArm&&!declinedMobs.has(n.mob)&&Math.abs(player.x-n.x)<26&&Math.abs(player.y-n.y)<26){mobEncounter(n.mob);break;}
     }
     if(!nearMob)contactArm=true;
     /* 特訓スポット（踏むと発火。同じマスに居続ける間は再発火しない） */
@@ -3408,7 +3494,7 @@ function exploreUpdate(dt){
     // 近くのNPCを探す
     let best=null,bd=1e9;
     for(const n of curMap().npcs){const d=Math.hypot(player.x-n.x,player.y-n.y);if(d<bd){bd=d;best=n;}}
-    if(best&&bd<44){
+    if(best&&bd<44&&talkGuard.id!==best.id){
       if(best.mob){
         if(!G.talkN)G.talkN={};
         G.talkN[best.name]=(G.talkN[best.name]||0)+1; /* スカウトの会話条件用に、話しかけた回数を数える */
@@ -3512,7 +3598,10 @@ function drawExplore(){
     if(c==='C'){ctx.strokeStyle='rgba(255,255,255,.6)';ctx.strokeRect(x+1,y+1,30,30);}
   }
   // マップ移動ゲートの行き先ラベル（v1.0.2）: ワープタイルの上に行き先の地名を出す
-  for(const w of curMap().warps){
+  // v1.1: ゲートは3タイル幅になったので、行き先ごとに中央の1タイルだけに描く
+  const warpLabelTiles={};
+  for(const w of curMap().warps){(warpLabelTiles[w.to]=warpLabelTiles[w.to]||[]).push(w);}
+  for(const w of Object.values(warpLabelTiles).map(ws=>ws[Math.floor(ws.length/2)])){
     const dest=MAPS[w.to];if(!dest)continue;
     const label='→ '+dest.name;
     ctx.font='bold 11px sans-serif';
@@ -3574,7 +3663,7 @@ function drawProfile(){
   const p=effPlayer(base),pr=progOf(base.name);
   ctx.fillStyle='#fff';ctx.font='bold 19px sans-serif';ctx.fillText(p.name+'（'+(SCHOOL_OF[p.name]||'')+'）',420,116);
   ctx.font='15px sans-serif';ctx.fillStyle='#9ab';
-  ctx.fillText('ポジション '+p.pos+'　属性 '+p.elem+'　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=LV_MAX?'MAX':expNeed(pr.lv)),420,142);
+  ctx.fillText('ポジション '+p.pos+'　属性 '+p.elem+'　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=LV_MAX?'MAX':expNeed(pr.lv))+'　成長 '+growthTypeOf(base.name),420,142);
   ctx.fillText('FP '+p.maxFP+'　TP '+p.maxTP+'（TP最大値はLv連動）',420,164);
   STAT_NAMES.forEach((lb,i)=>{
     const x=420+(i%4)*118,y=192+Math.floor(i/4)*30;
@@ -3602,8 +3691,12 @@ function drawProfile(){
       ctx.fillText('・'+t.name+'（'+t.rank+'／TP'+t.tp+'）　習得済み',436,y);
     });
   }
-  ctx.font='15px sans-serif';ctx.fillStyle='#eef';ctx.fillText('紹介',420,412);
-  ctx.font='15px sans-serif';wrapText(p.intro,436,434,420,22);
+  /* v1.1: 通算成績（公式戦・ルート戦のみ集計） */
+  const car=(G.career||{})[base.name];
+  ctx.font='13px sans-serif';ctx.fillStyle='#cfe';
+  ctx.fillText(car?('通算：'+car.matches+'試合 '+car.wins+'勝　得点'+car.pts+'（スパイク'+car.spike+'・ブロック'+car.block+'・エース'+car.ace+'）　ディグ'+car.dig):'通算：まだ試合に出ていない',420,406);
+  ctx.font='15px sans-serif';ctx.fillStyle='#eef';ctx.fillText('紹介',420,428);
+  ctx.font='15px sans-serif';wrapText(p.intro,436,448,420,22);
   ctx.fillStyle='#9ab';ctx.font='12px sans-serif';ctx.fillText('↑↓で選択　Xで閉じる',420,486);
 }
 
@@ -3680,10 +3773,12 @@ function libUpdate(){
       const unmet=cand.conds.filter(c=>!c.ok);
       const evt=unmet.find(c=>c.def.t==='event');
       if(unmet.length===1&&evt){
-        /* 好感イベントの仮置き進行（専用イベントはフェーズ4で実装） */
+        /* 声かけイベント（v1.1: 内部向けの「仮置き」文言を廃し、イベント名を
+           使ったプレイヤー向けの自然な文言・進行に差し替え） */
         if(!G.evtDone)G.evtDone={};
         G.evtDone[cand.name]=true;saveGame();
-        lib.msg=cand.name+'に声をかけ、合同参加の約束を取り付けた（好感イベント：仮置き進行）';
+        const evTitle=((evt.def&&evt.def.label)||evt.label||'').replace(/^好感イベント/,'');
+        lib.msg=cand.name+'に声をかけた。'+(evTitle?evTitle+'で意気投合し、':'')+'合同参加の約束を取り付けた！';
         return;
       }
       if(unmet.length){lib.msg='条件未達：'+unmet[0].text;return;}
@@ -3730,7 +3825,7 @@ function drawLibDetailOwn(base){
   const p=effPlayer(base),pr=progOf(base.name);
   ctx.fillStyle='#fff';ctx.font='bold 19px sans-serif';ctx.fillText(p.name,492,116);
   ctx.font='14px sans-serif';ctx.fillStyle='#9ab';
-  ctx.fillText('出身 '+SCHOOL_OF[p.name]+'　'+p.pos+'／'+p.elem+'属性　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=LV_MAX?'MAX':expNeed(pr.lv)),492,140);
+  ctx.fillText('出身 '+SCHOOL_OF[p.name]+'　'+p.pos+'／'+p.elem+'属性　Lv '+pr.lv+'　EXP '+pr.exp+' / '+(pr.lv>=LV_MAX?'MAX':expNeed(pr.lv))+'　成長 '+growthTypeOf(base.name),492,140);
   ctx.fillText('役割：'+ROLE_LABEL[roleOf(p.name)]+'（Zで変更：未登録→控え→スタメン→リベロ→未登録）',492,162);
   STAT_NAMES.forEach((lb,i)=>{
     const x=492+(i%4)*100,y=192+Math.floor(i/4)*28;
@@ -3904,7 +3999,7 @@ function mobEncounter(teamId){
     openMenu(520,320,[
       {label:'ミニバトルに挑む（3人制・1点先取）'},
       {label:'やめておく'},
-    ],idx=>{dlg=null;if(idx===0)openFormation(team);});
+    ],idx=>{dlg=null;if(idx===0)openFormation(team);else declinedMobs.add(teamId);});
   });
 }
 /* ミニバトルの初回ガイド（v1.0.2）: プレイヤーの初バトルは剛太戦（公式戦の
@@ -3928,7 +4023,7 @@ function formUpdate(){
   const roster=libPlayers();
   if(hit('ArrowUp','w','W'))form.cur=(form.cur+roster.length-1)%roster.length;
   if(hit('ArrowDown','s','S'))form.cur=(form.cur+1)%roster.length;
-  if(hit('x','X','Escape')){form=null;return;}
+  if(hit('x','X','Escape')){declinedMobs.add(form.team.id);form=null;return;}
   const toggle=i=>{
     const k=form.sel.indexOf(i);
     if(k>=0)form.sel.splice(k,1);
@@ -4144,6 +4239,9 @@ function setupMatch(opts){
      /* 合体技（v0.13）: pendingCombo は得点時の ゆうじょうP+2（§5.1）判定用、
         comboYj は1試合の付与累計（最大+10） */
      pendingCombo:null,comboYj:0,
+     /* v1.1: 試合スタッツ（名前→{team,pts,spike,block,ace,dig}）／選手交代の
+        再出場不可リスト（subOut）／決め台詞の使用済み（usedLines、1試合1人1回） */
+     stats:{},subOut:{},usedLines:{},lastTechRank:null,
      ai:opts.ai?AI_LEVELS[opts.ai]:null,aiName:opts.ai||null,
      rallySeen:{},totalRallies:0,picks:opts.picks||null};
   A.side='L';H.side='R';A.foe=H;H.foe=A;A.isP=true;H.isP=false;
@@ -4154,6 +4252,24 @@ function setupMatch(opts){
   M.afterWait=()=>startRally();
   scene='match';
 }
+/* 試合スタッツの加算（v1.1）。kind: spike/block/ace は得点も +1、dig は本数のみ */
+function statAdd(team,p,kind){
+  if(!M||!M.stats||!p)return;
+  const s=M.stats[p.name]||(M.stats[p.name]={team:(team===M.A?'A':'H'),pts:0,spike:0,block:0,ace:0,dig:0});
+  if(kind!=='dig')s.pts++;
+  s[kind]++;
+}
+/* 決め台詞（voice-bible.md、v1.1）: 得点時に、ここぞの局面でのみ本人が言う。
+   運用ルール＝多用しない（1試合に1人1回まで）。美月の台詞はコートに入る
+   とき専用なので選手交代側で使う。湊の台詞は配球専用に温存し、ここでは使わない */
+const SIG_LINES={
+ '高嶺 陽翔':'もう一本、俺に上げろ！',
+ '早瀬 凪':'焦らなくていい。次、つなごう',
+ '大磯 紗良':'ここは通さない',
+ '赤城 剛太':'パワーで解決だ！',
+ '石動 健吾':'……任せろ',
+ '速川 蓮':'今の、拾うから！',
+};
 /* 初試合チュートリアル（浜風戦の開始時のみ、凪のセリフで2択コマンドの考え方を説明。
    voice-bible の凪の口調＝指示の前に名前を呼ぶ／短く的確。決め台詞は使わない） */
 const TUTORIAL_LINES=[
@@ -4163,6 +4279,8 @@ const TUTORIAL_LINES=[
  {name:'早瀬 凪',text:'守る時は、ワンタッチで威力を殺すか、シャットで止め切るか。どっちも正解じゃない。相手と場面で選ぶ'},
  {name:'早瀬 凪',text:'属性の相性も覚えて。火は林に、林は風に、風は山に、山は火に強い。相性が良い相手には、対決値が少し伸びる'},
  {name:'早瀬 凪',text:'FPは体力のこと。減ってくると能力が下がってくる。苦しい時は、タイムアウトで立て直して'},
+ {name:'早瀬 凪',text:'対決の結果に出る「差」は、左の数字から見た差だよ。サーブなら、差がマイナスでも受け手の方が大きければパスは通る'},
+ {name:'早瀬 凪',text:'サーブの目安はね、差-10以下でAパス、-9から+9でBパス、+10以上でCパス。+20以上はサービスエースになっちゃう'},
  {name:'早瀬 凪',text:'迷ったら、メニューの右側を見て。どの能力で勝負するか書いてある。……行こう'},
 ];
 /* 敗北後の再挑戦で凪が出す作戦ヒント（§3.3）。数値改定後の式に沿った内容にする */
@@ -4262,6 +4380,7 @@ function flyBall(x1,y1,dur,onDone){
 }
 function showCutin(p,t,cb){
   M.cutin={p,t,timer:1.15};
+  if(t&&t.rank)M.lastTechRank=t.rank; /* v1.1: 決め台詞の「ここぞ」判定用 */
   M.cutinCb=cb;M.phase='cutin';
 }
 function spendFP(p,n){p.fp=Math.max(0,p.fp-n);}
@@ -4301,13 +4420,23 @@ function openTimeout(reopen){
   openTimeoutMenu(reopen);
 }
 function openTimeoutMenu(reopen){
+  /* v1.1: 買えない項目も選べるようにし、押した時に理由をメッセージで伝える
+     （disabled のままだと「押しても無反応」で理由が分からなかった） */
   const items=[
-    {label:'スポーツドリンクを使う',sub:'部費'+DRINK_COST+'円／FP+'+DRINK_FP+'／1人1本まで',disabled:(G.buhi||0)<DRINK_COST},
-    {label:'差し入れを使う',sub:'ゆうじょうP '+SASHIIRE_COST+'／FP+'+SASHIIRE_FP+'／1試合1個',disabled:M.sashiireUsed||G.yuujou<SASHIIRE_COST},
+    {label:'スポーツドリンクを使う',sub:'部費'+DRINK_COST+'円／FP+'+DRINK_FP+'／1人1本まで'},
+    {label:'差し入れを使う',sub:'ゆうじょうP '+SASHIIRE_COST+'／FP+'+SASHIIRE_FP+'／1試合1個'},
     {label:'戻る（タイムアウト終了）'},
   ];
   openMenu(600,140,items,idx=>{
     if(idx===2){reopen();return;}
+    if(idx===0&&(G.buhi||0)<DRINK_COST){
+      M.msg='部費が足りない（必要 '+DRINK_COST+'円／所持 '+(G.buhi||0)+'円）。ドリンクは買えなかった';
+      openTimeoutMenu(reopen);return;
+    }
+    if(idx===1&&(M.sashiireUsed||G.yuujou<SASHIIRE_COST)){
+      M.msg=M.sashiireUsed?'差し入れは1試合に1個まで。もう使った':'ゆうじょうPが足りない（必要 '+SASHIIRE_COST+'P／所持 '+G.yuujou+'P）';
+      openTimeoutMenu(reopen);return;
+    }
     openTimeoutTarget(idx===0?'drink':'sashiire',reopen);
   });
   M.phase='timeoutMenu';
@@ -4336,6 +4465,53 @@ function openTimeoutTarget(kind,reopen){
   });
   M.phase='timeoutMenu';
 }
+/* ---------- 選手交代（REQUIREMENTS の確定仕様「ピンチサーバー交代あり」、v1.1） ----------
+   ゲーム用に簡略化したルール（報告明記分）:
+   ・交代できるのは得点間だけ（自チームのサーブ／レシーブの選択メニューから）
+   ・エントリー12人の中から選ぶ。下げた選手はその試合に再出場できない
+   ・交代回数の上限はなし。リベロは自動交代の仕組みのまま手動交代の対象外
+   ・ミニバトルでは不可。相手チームは交代しない
+   サーバーその人と交代すれば、新しい選手がそのままサーブを打つ（ピンチサーバー） */
+function canSub(){
+  if(!M||M.mini||M.over)return false;
+  const hasOut=M.A.court.some(p=>p.pos!=='L');
+  const hasIn=M.A.bench.some(bp=>!M.subOut[bp.name]&&bp.name!==M.liberoName);
+  return hasOut&&hasIn;
+}
+function subEntry(reopen){
+  if(!canSub())return null;
+  return {label:'選手交代',sub:'控えと交代（再出場不可）',_sub:true,_reopen:reopen};
+}
+function openSubMenu(reopen){
+  const outItems=M.A.court.filter(p=>p.pos!=='L').map(p=>({
+    label:'下げる：'+p.short+'（'+p.pos+'）',sub:'FP '+Math.round(p.fp)+'/'+p.maxFP,_p:p}));
+  outItems.push({label:'やめる',_cancel:true});
+  openMenu(600,140,outItems,idx=>{
+    const it=outItems[idx];
+    if(!it||it._cancel||!it._p){reopen();return;}
+    const out=it._p;
+    const inItems=M.A.bench.filter(bp=>!M.subOut[bp.name]&&bp.name!==M.liberoName).map(bp=>({
+      label:'入れる：'+bp.short+'（'+bp.pos+'）',sub:'FP '+Math.round(bp.fp)+'/'+bp.maxFP,_p:bp}));
+    inItems.push({label:'やめる',_cancel:true});
+    openMenu(600,140,inItems,jdx=>{
+      const jt=inItems[jdx];
+      if(!jt||jt._cancel||!jt._p){reopen();return;}
+      doSubstitute(out,jt._p,reopen);
+    });
+  });
+}
+function doSubstitute(out,inP,reopen){
+  const ci=M.A.court.indexOf(out),bi=M.A.bench.indexOf(inP);
+  if(ci<0||bi<0){reopen();return;}
+  M.A.court[ci]=inP;M.A.bench[bi]=out;
+  M.subOut[out.name]=true;
+  if(M.liberoPartner&&(M.liberoPartner.name===out.name||M.liberoPartner.name===inP.name))M.liberoPartner=null;
+  inP.x=out.x;inP.y=out.y;inP.tx=out.tx;inP.ty=out.ty;
+  assignPositions(M.A);
+  M.msg=out.short+' に代わって '+inP.short+' がコートへ！（'+out.short+' はこの試合に戻れない）';
+  if(inP.name==='日向 美月')M.msg+='　美月「私のサーブで流れ変えます！」';
+  reopen();
+}
 /* 自チームのサーブメニュー（タイムアウトから戻れるよう、startRally から分離） */
 function openServeMenu(sv,server){
   M.actor=server;
@@ -4346,8 +4522,10 @@ function openServeMenu(sv,server){
   ];
   // ミニバトルでは必殺サーブ禁止（1点先取で一発終了になるため）
   if(!M.mini)server.techs.filter(t=>t.cat==='serve').forEach(t=>items.push({label:'必殺技：'+t.name,sub:'TP'+t.tp,disabled:server.tp<t.tp,_tech:t}));
+  const sb=subEntry(()=>openServeMenu(sv,M.A.court[0]));if(sb)items.push(sb);
   const to=timeoutEntry(()=>openServeMenu(sv,server));if(to)items.push(to);
   openMenu(600,300,items,idx=>{
+    if(items[idx]._sub){openSubMenu(items[idx]._reopen);return;}
     if(items[idx]._timeout){openTimeout(items[idx]._reopen);return;}
     const it=items[idx];
     M._serveStyle=it._style||'power';
@@ -4368,7 +4546,7 @@ function startRally(){
     return;
   }
   tickAwakening(); /* 覚醒の持続管理（§9.4: 3ラリー） */
-  M.rally=0;
+  M.rally=0;M.lastTechRank=null;
   /* EXP配分（§3.3）のための出場ラリー集計：ラリー開始時にコートにいた選手を数える近似
      （触球ベースではない）。公式戦のみ対象 */
   if(!M.mini){M.totalRallies++;for(const p of M.A.court)M.rallySeen[p.name]=(M.rallySeen[p.name]||0)+1;}
@@ -4403,7 +4581,7 @@ function digValue(digger,att,style,techPow){
 /* ブロックを抜けたスパイクのディグ判定（共通処理）。
    need＝拾える敷居、aVal＝Aパスになる敷居（どちらも呼び出し側が実効威力から決める）
    effVal＝相手スパイクの実効威力（対決値の添記用、v0.9） */
-function doDig(attTeam,att,need,aVal,digStyle,digPow,effVal){
+function doDig(attTeam,att,need,aVal,digStyle,digPow,effVal,pre){
   const df=attTeam.foe;
   const digger=bestBy(df,backIdx(),2);
   flyBall(digger.x,digger.y,0.35,()=>{
@@ -4412,13 +4590,18 @@ function doDig(attTeam,att,need,aVal,digStyle,digPow,effVal){
     if(digStyle==='react')digVal+=6;
     spendFP(digger,2);
     const note=(effVal!==undefined&&effVal!==null)?duelNote('スパイク値',effVal,'レシーブ値',digVal,att,digger):'';
+    /* v1.1: pre は呼び出し側の文脈文（ワンタッチの成否など）。結果文の前に
+       連結して、「選んだ行動の結果がどうなったか」を消さないようにする */
+    const preS=pre||'';
     if(digVal>=need){
       // 「反応する」は拾えても体勢が崩れやすいので Aパス の敷居を +6 高くする
       const grade=digVal>=aVal+(digStyle==='react'?6:0)?'A':'B';
-      M.msg=digger.short+(digStyle==='react'?' が反応して拾った！':' が拾った！')+' カウンターへ'+note;
+      M.msg=preS+digger.short+(digStyle==='react'?' が反応して拾った！':' が拾った！')+' カウンターへ'+note;
+      statAdd(df,digger,'dig');
       attackPhase(df,grade);
     }else{
-      M.msg=att.short+' のスパイクが決まった！'+note;
+      M.msg=preS+att.short+' のスパイクが決まった！'+note;
+      statAdd(attTeam,att,'spike');
       point(attTeam.isP?'A':'H');
     }
   });
@@ -4444,8 +4627,10 @@ function resolveServe(sv,tech){
         items.push({label:'必殺レシーブ：'+t.name,sub:'TP'+t.tp,disabled:receiver.tp<t.tp,_tech:t});
       }
     });
+    const sb=subEntry(()=>resolveServe(sv,tech));if(sb)items.push(sb);
     const to=timeoutEntry(showRecvMenu);if(to)items.push(to);
     openMenu(600,300,items,idx=>{
+      if(items[idx]._sub){openSubMenu(items[idx]._reopen);return;}
       if(items[idx]._timeout){openTimeout(showRecvMenu);return;}
       const it=items[idx];M.serveRecvChosen=true;M._recvPow=it._tech?it._tech.pow:0;M._recvStyle=it._style||'read';
       if(it._tech){if(it._combo)useCombo(df,receiver,it._tech);else useTech(receiver,it._tech);showCutin(receiver,it._tech,()=>resolveServe(sv,tech));}
@@ -4494,7 +4679,7 @@ function resolveServe(sv,tech){
   if(M.mini&&df.isP&&!M.miniRecvDone){rVal+=4;M.miniRecvDone=true;}
   const diff=rVal-sVal;
   flyBall(receiver.x,receiver.y,0.55,()=>{
-    if(diff<=-20){M.msg='サービスエース！ '+server.short+' のサーブが決まった'+duelNote('サーブ値',sVal,'レシーブ値',rVal,server,receiver);M.pointActors=[server];point(sv.isP?'A':'H');return;}
+    if(diff<=-20){M.msg='サービスエース！ '+server.short+' のサーブが決まった'+duelNote('サーブ値',sVal,'レシーブ値',rVal,server,receiver);M.pointActors=[server];statAdd(sv,server,'ace');point(sv.isP?'A':'H');return;}
     M.grade=diff>=10?'A':diff>=-9?'B':'C';
     M.msg=(df.isP?M.myName:M.oppName)+'のレシーブ ― '+M.grade+'パス（'+receiver.short+'）'
       +(rStyle==='react'&&diff>=0?' 反応で拾った！':sStyle==='course'&&diff>=0&&diff<10?' コースを読み切った！':'')
@@ -4693,23 +4878,30 @@ function resolveSpike(attTeam,att,slot,tech,tossTech,grade,style){
     const fDiff=feintVal-feintResist;
     const fNote=duelNote('フェイント値',feintVal,'抵抗値',feintResist,att,null);
     flyBall(main.x,main.y,0.3,()=>{
-      if(fDiff<=-11){M.msg='フェイントを読まれた！ '+main.short+' のブロック'+fNote;M.pointActors=sub?[main,sub]:[main];point(df.isP?'A':'H');return;}
-      if(fDiff<0){
+      /* v1.1: 「受ける」選択（読む／反応／必殺レシーブ）の時は、読み切られても
+         ブロックの直接得点にはせず、受け手のディグ判定に持ち込む（A2の整合） */
+      const digSel=sel&&(sel.kind==='dig'||sel.kind==='receive');
+      if(fDiff<=-11&&!digSel){M.msg='フェイントを読まれた！ '+main.short+' のブロック'+fNote;M.pointActors=sub?[main,sub]:[main];statAdd(df,main,'block');point(df.isP?'A':'H');return;}
+      if(fDiff<0&&!digSel){
         /* ブロックに引っかかり → カバー判定（閾値 60＋|差分|、§1.5） */
         const cover=bestBy(attTeam,backIdx(),2);
         if(cover.st[2]+irnd(-5,5)>=60+Math.abs(fDiff)){M.msg='フェイントが引っかかった…でもカバー！ ラリー継続'+fNote;flyBall(cover.x,cover.y,0.3,()=>attackPhase(attTeam,'C'));return;}
-        M.msg='フェイントを拾われた！'+fNote;point(df.isP?'A':'H');return;
+        const dg2=bestBy(df,backIdx(),2);
+        M.msg=dg2.short+' がフェイントを拾った！'+fNote;M.pointActors=[dg2];statAdd(df,dg2,'dig');point(df.isP?'A':'H');return;
       }
       // ブロック無効化 → ディグ勝負。攻撃値は feintVal×0.6。反応遅れ補正: 読む -6（読みはフェイントに強い）/ 反応する -18
       const fAtk=Math.round(feintVal*0.6);
       const delay=digStyle==='react'?-18:-6;
       const digger=bestBy(df,backIdx(),2);
+      /* 読み切られた状態で「受ける」を選んでいたら、受け手は体勢を整えて受けられる（+8） */
+      const readBonus=(fDiff<=-11&&digSel)?8:0;
+      const readPre=(fDiff<=-11&&digSel)?'フェイントを読まれた！ でも':'';
       flyBall(digger.x,digger.y,0.35,()=>{
-        const digVal=digValue(digger,att,digStyle,digPow)+delay;
+        const digVal=digValue(digger,att,digStyle,digPow)+delay+readBonus;
         spendFP(digger,2);
         const dNote=duelNote('フェイント攻撃値',fAtk,'レシーブ値',digVal,att,digger);
-        if(digVal>=fAtk-5){M.msg='フェイントがブロックの裏を抜いた！ でも'+digger.short+' が拾った！ カウンターへ'+dNote;attackPhase(df,digVal-fAtk>=10?'A':'B');}
-        else{M.msg='フェイントがブロックの裏を抜いて決まった！ '+att.short+dNote;point(attTeam.isP?'A':'H');}
+        if(digVal>=fAtk-5){M.msg=readPre+'フェイントがブロックの裏を抜いた！ でも'+digger.short+' が拾った！ カウンターへ'+dNote;statAdd(df,digger,'dig');attackPhase(df,digVal-fAtk>=10?'A':'B');}
+        else{M.msg=readPre+'フェイントがブロックの裏を抜いて決まった！ '+att.short+dNote;statAdd(attTeam,att,'spike');point(attTeam.isP?'A':'H');}
       });
     });
     return;
@@ -4725,21 +4917,39 @@ function resolveSpike(attTeam,att,slot,tech,tossTech,grade,style){
       const touchVal=Math.round(blockVal*0.7)+Math.round(main.st[2]*0.3)+irnd(-5,5);
       const tNote=duelNote('ワンタッチ値',touchVal,'スパイク値',spikeVal,main,att);
       if(touchVal>=spikeVal-10){
-        M.msg='ワンタッチ！ '+main.short+' が当てて威力を殺した'+tNote;
         const eff=Math.round(spikeVal*0.85);
-        doDig(attTeam,att,eff-5,eff+10,digStyle,digPow,eff);
+        /* v1.1: 成否の文脈文は doDig の pre で結果文に連結する（上書きで消さない） */
+        doDig(attTeam,att,eff-5,eff+10,digStyle,digPow,eff,'ワンタッチ！ '+main.short+' が当てて威力を殺した'+tNote+' ');
       }else{
-        M.msg='ワンタッチ狙い…手が割れた！'+tNote;
-        doDig(attTeam,att,(spikeVal+5)-5,(spikeVal+5)+10,digStyle,digPow,spikeVal+5);
+        doDig(attTeam,att,(spikeVal+5)-5,(spikeVal+5)+10,digStyle,digPow,spikeVal+5,'ワンタッチ狙い…手が割れた！'+tNote+' ');
       }
       return;
     }
     /* シャット狙い（§1.8）: ブロック値そのもので勝負。際どい帯（-4〜+4）で外すと、そのまま決められる */
     if(sel&&sel.kind==='shut'){
       const sNote=duelNote('スパイク値',spikeVal,'ブロック値',blockVal,att,main);
-      if(diff<=-5){M.msg='シャットアウト！ '+main.short+' のブロック'+sNote;M.pointActors=sub?[main,sub]:[main];point(df.isP?'A':'H');return;}
-      if(diff<=4){M.msg='シャットを狙ったが抜かれた！'+sNote;point(attTeam.isP?'A':'H');return;}
+      if(diff<=-5){M.msg='シャットアウト！ '+main.short+' のブロック'+sNote;M.pointActors=sub?[main,sub]:[main];statAdd(df,main,'block');point(df.isP?'A':'H');return;}
+      if(diff<=4){M.msg='シャットを狙ったが抜かれた！'+sNote;statAdd(attTeam,att,'spike');point(attTeam.isP?'A':'H');return;}
       doDig(attTeam,att,spikeVal-5,spikeVal+10,digStyle,digPow,spikeVal);
+      return;
+    }
+    /* 「受ける」選択（読んで受ける／反応して受ける／必殺レシーブ）の整合（v1.1）:
+       ブロック値が上回っても直接のブロック得点にはせず、ブロックが当てて
+       威力を落としたボールを、選んだ受け手が受ける判定に持ち込む。
+       際どい帯ではワンタッチで受け手が拾う／抜ける、のどちらかになる */
+    if(sel&&(sel.kind==='dig'||sel.kind==='receive')){
+      const dNote=duelNote('スパイク値',spikeVal,'ブロック値',blockVal,att,main);
+      if(diff<=-5){
+        const eff=Math.round(spikeVal*0.85);
+        doDig(attTeam,att,eff-5,eff+10,digStyle,digPow,eff,main.short+' のブロックが当てて威力を殺した！'+dNote+' ');
+        return;
+      }
+      if(diff<=4){
+        const digger=bestBy(df,backIdx(),2);
+        if(Math.random()<0.5){M.msg='ワンタッチ！ '+digger.short+' が拾った！ カウンターへ'+dNote;statAdd(df,digger,'dig');attackPhase(df,'C');return;}
+        M.msg='ワンタッチ！ …決まった！'+dNote;statAdd(attTeam,att,'spike');point(attTeam.isP?'A':'H');return;
+      }
+      doDig(attTeam,att,diff>=15?spikeVal-15:spikeVal-5,spikeVal+10,digStyle,digPow,spikeVal);
       return;
     }
     if(diff<=-5){
@@ -4750,12 +4960,15 @@ function resolveSpike(attTeam,att,slot,tech,tossTech,grade,style){
       if(cover.st[2]+irnd(-5,5)>=60+Math.abs(diff)){M.msg='ブロックカバー！ ラリー継続'+bNote;flyBall(cover.x,cover.y,0.3,()=>attackPhase(attTeam,'C'));return;}
       M.msg=(diff<=-20?'完璧なシャットアウト！ '+main.short+' のブロック':'ブロックに捕まった！')+bNote;
       M.pointActors=sub?[main,sub]:[main];
+      statAdd(df,main,'block');
       point(df.isP?'A':'H');return;
     }
     if(diff<=4){
       const wNote=duelNote('スパイク値',spikeVal,'ブロック値',blockVal,att,main);
-      if(Math.random()<0.5){M.msg='ワンタッチ！ …決まった！'+wNote;point(attTeam.isP?'A':'H');return;}
-      M.msg='ワンタッチで拾った！'+wNote;attackPhase(df,'C');return;
+      if(Math.random()<0.5){M.msg='ワンタッチ！ …決まった！'+wNote;statAdd(attTeam,att,'spike');point(attTeam.isP?'A':'H');return;}
+      /* v1.1: 拾った選手を名指しする（誰が拾ったか分からない表示をなくす） */
+      const digger=bestBy(df,backIdx(),2);
+      M.msg='ワンタッチ！ '+digger.short+' が拾った！'+wNote;statAdd(df,digger,'dig');attackPhase(df,'C');return;
     }
     // ブロックを抜けた → ディグ判定
     doDig(attTeam,att,diff>=15?spikeVal-15:spikeVal-5,spikeVal+10,digStyle,digPow,spikeVal);
@@ -4763,6 +4976,7 @@ function resolveSpike(attTeam,att,slot,tech,tossTech,grade,style){
 }
 function point(winner){
   if(winner==='A')M.scoreA++;else M.scoreH++;
+  const actorsAtPoint=M.pointActors; /* v1.1: 決め台詞の判定用に、TP処理で消える前に保持 */
   const wt=teamOf(winner);
   /* TP回復（§2.4、2026-11-27 改定）: 得点したチームのコート内全員 +1、
      さらにその得点に関わった選手（トス／スパイク／ブロックの担当＝M.pointActors）に追加で +1。
@@ -4778,6 +4992,18 @@ function point(winner){
       M.msg+='（合体技成功！ ゆうじょうP +2）';
     }
     M.pendingCombo=null;
+  }
+  /* 決め台詞（voice-bible.md、v1.1）: 自チームの得点で、関与者に主要キャラが
+     いる時だけ、ここぞの局面（終盤／強以上の必殺技／覚醒中）に限って言う。
+     1試合に1人1回まで（多用しない） */
+  if(winner==='A'&&!M.mini&&actorsAtPoint&&actorsAtPoint.length){
+    const clutch=M.scoreA>=8||M.scoreH>=8||M.lastTechRank==='強'||M.lastTechRank==='最強'||(M.awake&&M.awake.A&&M.awake.A.length>0);
+    if(clutch){
+      for(const a0 of actorsAtPoint){
+        const nm=typeof a0==='string'?a0:a0.name;
+        if(SIG_LINES[nm]&&!M.usedLines[nm]){M.usedLines[nm]=true;const b=baseOf(nm);M.msg+='　'+(b?b.short:nm)+'「'+SIG_LINES[nm]+'」';break;}
+      }
+    }
   }
   M.phase='point';M.wait=1.4;
   const winScore=winner==='A'?M.scoreA:M.scoreH, loseScore=winner==='A'?M.scoreH:M.scoreA;
@@ -4934,8 +5160,20 @@ function endMatch(winner){
     if(benchAmt>0)for(const p of lib)if(!(M.pickNames||[]).includes(p.name))levelUps=levelUps.concat(giveMini(p.name,benchAmt));
     expSummary='経験値：出場3人 +'+amt+'／非出場メンバー +'+benchAmt+'（30%配分）';
   }
+  /* 試合スタッツとMVP（v1.1）: 結果画面用に自チーム分を得点順に集計し、
+     通算成績（G.career）へ加算する。通算はミニバトルと練習試合を除く */
+  const myStats=Object.keys(M.stats||{}).filter(n=>M.stats[n].team==='A').map(n=>({name:n,pts:M.stats[n].pts,spike:M.stats[n].spike,block:M.stats[n].block,ace:M.stats[n].ace,dig:M.stats[n].dig}));
+  myStats.sort((a,b)=>b.pts-a.pts||(b.spike+b.block+b.ace+b.dig)-(a.spike+a.block+a.ace+a.dig));
+  const mvpS=myStats.length?myStats[0]:null;
+  if(!M.mini&&!M.practice){
+    if(!G.career)G.career={};
+    const careerOf=n=>G.career[n]||(G.career[n]={matches:0,pts:0,spike:0,block:0,ace:0,dig:0,wins:0});
+    for(const p of M.A.all){if((M.rallySeen[p.name]||0)>0){const c=careerOf(p.name);c.matches++;if(win)c.wins++;}}
+    for(const s of myStats){const c=careerOf(s.name);c.pts+=s.pts;c.spike+=s.spike;c.block+=s.block;c.ace+=s.ace;c.dig+=s.dig;}
+  }
   saveGame();
   M.result={win,rk:rw.nk,yk:rw.yj,buhi:rw.buhi||0,expSummary,note,
+    stats:myStats.slice(0,5),mvp:mvpS?{name:mvpS.name,short:(baseOf(mvpS.name)||{short:mvpS.name}).short,pts:mvpS.pts}:null,
     levelUps:levelUps.map(u=>{const b=baseOf(u.name);return {short:b?b.short:u.name,lv:u.lv,techs:u.techs};})};
   openMenu(330,452,[{label:'探索に戻る'}],()=>{scene='explore';const cb=M?M.onReturn:null;M=null;if(cb)cb();});
 }
@@ -4989,8 +5227,10 @@ function drawMatch(){
   ctx.fillStyle='#fff';ctx.font='bold 22px sans-serif';ctx.textAlign='center';
   ctx.fillText(M.myName+' '+M.scoreA+' ― '+M.scoreH+' '+M.oppName,480,38);
   ctx.textAlign='left';
+  /* v1.1: サーブ表示は左上のピルへ（スコアボード右端の外にはみ出して隠れる問題の解消） */
+  if(!M.cutin){ctx.fillStyle='rgba(8,12,28,.88)';ctx.fillRect(8,8,170,24);
   ctx.fillStyle='#ffd76a';ctx.font='12px sans-serif';
-  ctx.fillText(M.serve==='A'?'● '+M.myName+'サーブ':'● '+M.oppName+'サーブ',736,32);
+  ctx.fillText(M.serve==='A'?'● '+M.myName+'サーブ':'● '+M.oppName+'サーブ',14,25);}
   // 選手
   const all=[...M.A.all.map(p=>({p,uni:'#bfe3ff'})),...M.H.all.map(p=>({p,uni:'#eef2f2'}))]
     .filter(o=>o.p.x).sort((a,b)=>a.p.y-b.p.y);
@@ -5012,8 +5252,13 @@ function drawMatch(){
   // メッセージ
   ctx.fillStyle='rgba(8,12,28,.88)';ctx.fillRect(180,458,600,30);
   ctx.fillStyle='#fff';ctx.font='15px sans-serif';ctx.fillText(M.msg,192,478);
+  /* v1.1: 対決値の読み方（差の符号とサーブのパス目安）を右下に常時表示 */
+  ctx.fillStyle='#9ab';ctx.font='10px sans-serif';
+  ctx.fillText('対決の差＝攻撃−守備',790,472);
+  ctx.fillText('サーブ: 差-10以下 Aパス',790,488);
+  ctx.fillText('±9 B ／ +10〜 C ／ +20〜 エース',790,504);
   drawTeamPanel();
-  if(M.actor&&(menu||M.phase==='defendMenu'))drawActorPanel(M.actor);
+  if(!M.over&&M.actor&&(menu||M.phase==='defendMenu'))drawActorPanel(M.actor);
   if(M.cutin)drawCutin();
   if(M.over)drawResult();
   drawMenu();
@@ -5067,10 +5312,17 @@ function drawResult(){
   ctx.fillStyle='#ffd76a';ctx.font='17px sans-serif';
   ctx.fillText(r.rk||r.yk||r.buhi?('ねっけつP +'+r.rk+'　ゆうじょうP +'+r.yk+(r.buhi?'　部費 +'+r.buhi+'円':'')):'報酬なし（また挑戦しよう）',480,240);
   ctx.fillStyle='#cfe';ctx.font='14px sans-serif';
-  if(r.expSummary)ctx.fillText(r.expSummary,480,268);
+  if(r.expSummary)ctx.fillText(r.expSummary,480,264);
+  /* v1.1: MVP と試合スタッツ上位 */
+  if(r.mvp){ctx.fillStyle='#ffd76a';ctx.font='bold 15px sans-serif';ctx.fillText('MVP：'+r.mvp.short+'（得点'+r.mvp.pts+'）',480,288);}
+  ctx.fillStyle='#cfe';ctx.font='12px sans-serif';
+  (r.stats||[]).slice(0,3).forEach((s,i)=>{
+    const b=baseOf(s.name);
+    ctx.fillText((b?b.short:s.name)+'　得点'+s.pts+'（スパイク'+s.spike+'・ブロック'+s.block+'・エース'+s.ace+'）ディグ'+s.dig,480,308+i*18);
+  });
   ctx.fillStyle='#ffd76a';ctx.font='15px sans-serif';
-  (r.levelUps||[]).slice(0,6).forEach((u,i)=>{
-    ctx.fillText('Lvアップ！ '+u.short+' → Lv'+u.lv+(u.techs.length?'　新技「'+u.techs.join('」「')+'」習得':''),480,296+i*22);
+  (r.levelUps||[]).slice(0,3).forEach((u,i)=>{
+    ctx.fillText('Lvアップ！ '+u.short+' → Lv'+u.lv+(u.techs.length?'　新技「'+u.techs.join('」「')+'」習得':''),480,368+i*19);
   });
   ctx.fillStyle='#9ab';ctx.font='13px sans-serif';
   ctx.fillText(r.note?r.note:(M.mini?(r.win?'ミニバトル勝利！':'負けてもゲームオーバーにはならない。再戦可能')
@@ -5086,6 +5338,10 @@ function drawTitle(){
   ctx.fillText('ファイアーシックス',480,180);
   ctx.fillStyle='#fff';ctx.font='15px sans-serif';
   ctx.fillText('廃部寸前の男女混合バレー部。再建の物語が始まる。',480,262);
+  /* v1.1: 名鑑コレクションの達成率と現在の称号 */
+  const dbTotal=Object.keys(PLAYER_DB).length, libN=(G.library||[]).length;
+  ctx.fillStyle='#9ab';ctx.font='12px sans-serif';
+  ctx.fillText('選手名鑑：'+libN+'/'+dbTotal+'人（'+(dbTotal?Math.floor(libN/dbTotal*100):0)+'%）'+((G.titles&&G.titles.length)?'　称号：'+G.titles[G.titles.length-1]:''),480,286);
   const items=['はじめから',validSave()?'つづきから':'つづきから（セーブなし）',
     '演出速度：'+(fxFast()?'高速':'通常')];
   items.forEach((s,i)=>{
@@ -5101,7 +5357,7 @@ function drawTitle(){
     ctx.fillText('セーブデータがあります。もう一度「はじめから」を選ぶと上書きして開始します',480,486);
   }
   ctx.fillStyle='#9ab';ctx.font='12px sans-serif';
-  ctx.fillText('v1.0.3 ― 本編8試合＋加入・章イベント＋全校・モブ・無所属・全国編スカウト＋装備ショップ＋クリア後ルート3本＋合体技＋覚醒',480,516);
+  ctx.fillText('v1.1 ― 本編8試合＋加入・章イベント＋全校・モブ・無所属・全国編スカウト＋装備ショップ＋クリア後ルート3本＋合体技＋覚醒＋選手交代＋スタッツ',480,516);
   ctx.textAlign='left';
 }
 function titleUpdate(){
