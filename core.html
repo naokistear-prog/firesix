@@ -2441,7 +2441,7 @@ const STREET_TILES=[
 "T...................T................T",
 "TPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPT",
 "T........F...........................T",
-"W...............PPPPPPPP.............T",
+"W...............PPPPPPPP.............W",
 "T...............PCCCCCCP.............T",
 "T...............PCCCCCCP.............T",
 "T...............PPPPPPPP.............T",
@@ -2451,7 +2451,57 @@ const STREET_TILES=[
 "T.......................BBBBBBB......T",
 "T.......................BBBDBBB......T",
 "T....................................T",
+"TTTTTTTTTTTTTTTTTTTWTTTTTTTTTTTTTTTTTT",
+];
+/* 公園（マップ追加）: 芝生と木立の中に、北側へ壁トスの壁（B）と
+   中央南に砂のコート（C）。西端（0,10）が商店街へのゲート */
+const PARK_TILES=[
 "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+"T....F.....T.....BBBBBB......F.......T",
+"T..........T.....BBBBBB..............T",
+"T..T...............PP.............T..T",
+"T..................PP................T",
+"T..F...............PP.....T......F...T",
+"T..................PP................T",
+"T....T.............PP..........T.....T",
+"T..................PP................T",
+"T..F...............PP.....F..........T",
+"WPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPT",
+"T..................PP................T",
+"T.............PCCCCCCCCP.............T",
+"T.............PCCCCCCCCP.............T",
+"T.............PCCCCCCCCP.............T",
+"T..................PP................T",
+"TPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPT",
+"T....F.........................F.....T",
+"T..........T....................T....T",
+"T....................................T",
+"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+];
+/* 駅前（マップ追加）: 北側に駅舎（B/D）、中央にロータリー（P）。
+   南端（19,20）が商店街へのゲート */
+const STATION_TILES=[
+"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+"TBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBT",
+"TBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBT",
+"TBBDDBBBBDDBBBBDDBBBBDDBBBBDDBBBDDBBTT",
+"TPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPT",
+"T....................................T",
+"T..........F.............T...........T",
+"T.................F..................T",
+"TPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPT",
+"T..............PPPPPPPPPP............T",
+"T..............PPPPPPPPPP............T",
+"T..............PPPPPPPPPP............T",
+"T..............PPPPPPPPPP............T",
+"TPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPT",
+"T....................................T",
+"T.........T..........................T",
+"T....................F...............T",
+"T....................................T",
+"T..T.................................T",
+"T....................................T",
+"TTTTTTTTTTTTTTTTTTTWTTTTTTTTTTTTTTTTTT",
 ];
 function mobNpc(id,team,name,x,y,hair,uni){return {id,team:team,mob:team,name,x:x*TILE,y:y*TILE,hair,uni};}
 /* 街NPC（v0.12、mobs.md の街モブNPC20人）。town:true で会話専用NPCとして扱い、
@@ -2517,9 +2567,10 @@ const MAPS={
   ]},
  street:{name:'朝凪商店街',label:'朝凪商店街',labelX:14*TILE,labelY:19*TILE+22,ground:'#8d8d96',path:'#a8a29a',
   tiles:STREET_TILES,
-  warps:[{x:0,y:10,to:'school',sx:36,sy:10}],
+  warps:[{x:0,y:10,to:'school',sx:36,sy:10},
+   {x:37,y:10,to:'park',sx:1,sy:10},
+   {x:19,y:20,to:'station',sx:19,sy:19}],
   npcs:[
-   {id:'minato',name:'若林 湊',x:5*TILE,y:7*TILE,hair:'#2c5e3a',uni:'#cfe8ff'},
    // 商店街アーケードスターズ（中央北）
    mobNpc('arcade1','arcade','ダイキ',11,6,'#8e5a2a','#ffd9a0'),
    mobNpc('arcade2','arcade','サキ',13,7,'#3a7a4a','#ffd9a0'),
@@ -2529,37 +2580,16 @@ const MAPS={
    mobNpc('fresh2','fresh','モモカ',24,12,'#c25e7a','#ffe9b0'),
    mobNpc('fresh3','fresh','ケンタ',19,15,'#2c5e3a','#ffe9b0'),
    // 以下 v0.12 のモブチームを、v1.0.3 でマップ全域に分散配置
-   mobNpc('sundays1','sundays','ケンジ',3,13,'#4a3a2a','#a0d8a0'),
-   mobNpc('sundays2','sundays','アヤカ',5,14,'#7a4a6e','#a0d8a0'),
-   mobNpc('sundays3','sundays','リョウコ',3,17,'#2c6e5e','#a0d8a0'),
+   // （公園サンデーズ／キッズ／ツインズ／ファーマーズは公園マップへ、
+   //   駅前／若葉／偵察は駅前マップへ移設し、商店街の密度を下げた）
    // 帰宅部（北西）
    mobNpc('kitakubu1','kitakubu','シュン',2,5,'#2c3a2c','#c8c8d8'),
    mobNpc('kitakubu2','kitakubu','カエデ',3,9,'#8e4a3a','#c8c8d8'),
    mobNpc('kitakubu3','kitakubu','トモヤ',2,11,'#4a4a3a','#c8c8d8'),
-   // キッズ（広場南。湊の周囲には置かない）
-   mobNpc('kids1','kids','ユカリ',12,12,'#7a4a6e','#ffd8b0'),
-   mobNpc('kids2','kids','ソラ',14,14,'#5e7a3a','#ffd8b0'),
-   mobNpc('kids3','kids','マホ',13,17,'#6e5e4a','#ffd8b0'),
-   // ツインズ（南西）
-   mobNpc('twins1','twins','レン',8,13,'#3a6e8e','#ffd0e0'),
-   mobNpc('twins2','twins','リン',11,14,'#c25e7a','#ffd0e0'),
-   mobNpc('twins3','twins','ナナミ',8,17,'#5e7a4a','#ffd0e0'),
-   // ファーマーズ（南）
-   mobNpc('farmers1','farmers','ゲン',15,18,'#3a3a22','#e8d8a0'),
-   mobNpc('farmers2','farmers','ツムギ',18,18,'#8e6a3a','#e8d8a0'),
-   mobNpc('farmers3','farmers','ワタル',20,17,'#7a3a2a','#e8d8a0'),
    // ビーチ（南東）
    mobNpc('beach1','beach','カイト',33,14,'#2a5e7a','#ffe0a0'),
    mobNpc('beach2','beach','ヒナ',31,15,'#7a5e2c','#ffe0a0'),
    mobNpc('beach3','beach','シオリ',32,18,'#a85e3a','#ffe0a0'),
-   // 駅前（北東）
-   mobNpc('ekimae21','ekimae2','ユウキ',23,5,'#3a4a3a','#b0c8e8'),
-   mobNpc('ekimae22','ekimae2','アカリ',25,7,'#6e4a7a','#b0c8e8'),
-   mobNpc('ekimae23','ekimae2','コウヘイ',22,7,'#4a5e3a','#b0c8e8'),
-   // 若葉（東）
-   mobNpc('wakaba1','wakaba','ワカバ',28,6,'#4a6a4a','#b0e0c8'),
-   mobNpc('wakaba2','wakaba','イッペイ',30,7,'#8e3a2a','#b0e0c8'),
-   mobNpc('wakaba3','wakaba','フク',27,12,'#5e5e3a','#b0e0c8'),
    // 留学生チーム（東端）
    mobNpc('exchange1','exchange','ルーカス',35,7,'#c8a83a','#e0b0d8'),
    mobNpc('exchange2','exchange','エマ',33,9,'#8e6a4a','#e0b0d8'),
@@ -2568,26 +2598,17 @@ const MAPS={
    mobNpc('running1','running','ハヤト',30,11,'#2a4a6e','#a0b8e8'),
    mobNpc('running2','running','アオイ',32,12,'#c25e5e','#a0b8e8'),
    mobNpc('running3','running','ジン',29,14,'#3a4a3a','#a0b8e8'),
-   // 偵察（北東端）
-   mobNpc('teisatsu1','teisatsu','キョウヤ',32,6,'#3a5e2c','#c8d8b0'),
-   mobNpc('teisatsu2','teisatsu','スズカ',34,5,'#c25e7a','#c8d8b0'),
-   mobNpc('teisatsu3','teisatsu','リョウマ',28,10,'#4a6a8e','#c8d8b0'),
    // 夢チーム（広場東）
    mobNpc('elite1','elite','セナ',23,9,'#a03c28','#f0d0a0'),
    mobNpc('elite2','elite','イオリ',25,10,'#2c4a6e','#f0d0a0'),
    mobNpc('elite3','elite','ヒビキ',22,11,'#5e4a2a','#f0d0a0'),
    // 街NPC（商店街マップ）※v0.12
-   townNpc('npc_michiko','ミチコ',17,5,'#8e6a5e','#ffe0d0',0),
-   townNpc('npc_teruo','テルオ',20,5,'#3a4a5e','#d0d8e8',0),
+   // （ミチコ／テルオ／お巡りさん／ゼンジは駅前へ、カワイ／ロクさんは公園へ移設）
    townNpc('npc_sano','サノ',6,10,'#2c4a6e','#bfe3ff',0),
-   townNpc('npc_kawai','カワイ',16,15,'#5e4a2c','#e8dcc0',3),
    townNpc('npc_goto','ゴトウ',8,6,'#4a5e4a','#d8e8d0',0),
    townNpc('npc_hood','フードの学生',19,12,'#3a3a44','#c8c8d8',0),
    townNpc('npc_isamu','イサム',19,9,'#6e3a2a','#ffe9b0',0),
-   townNpc('npc_police','お巡りさん',35,18,'#2c3a5e','#bfe3ff',0),
-   townNpc('npc_roku','ロクさん',27,15,'#5e4a3a','#e0d0b8',0),
    townNpc('npc_jinpei','ジンペイ',11,18,'#4a6a5e','#cfe8ff',0),
-   townNpc('npc_zenji','ゼンジ',35,13,'#6e5e2c','#f0e0b0',0),
    townNpc('npc_mirei','ミレイ',22,18,'#7a2c4a','#f0d0e0',0),
    townNpc('npc_hatsu','ハツ',23,14,'#9a9a9a','#e8e0d0',4),
   ],
@@ -2607,6 +2628,59 @@ const MAPS={
    {id:'S14',name:'土手ラン',stat:6,tier:'adv',x:34,y:17},
    {id:'S16',name:'四つ葉の丘',stat:7,tier:'adv',hidden:true,x:36,y:19},
   ]},
+ /* 公園: 湊の加入イベント（壁トス）の舞台。湊は北の壁の前に単独配置し、
+    周囲に他のNPCを置かない。商店街からモブ4チーム＋街NPC2人を移して分散 */
+ park:{name:'朝凪公園',label:'朝凪公園',labelX:18*TILE,labelY:19*TILE+22,ground:'#5f9e52',path:'#c9b586',
+  tiles:PARK_TILES,
+  warps:[{x:0,y:10,to:'street',sx:36,sy:10}],
+  npcs:[
+   /* 若林 湊: 壁トスの壁（北・B）の前。加入イベントの台本どおり「公園の壁打ち場」 */
+   {id:'minato',name:'若林 湊',x:19*TILE,y:4*TILE,hair:'#2c5e3a',uni:'#cfe8ff'},
+   // 公園サンデーズ（砂のコート西）
+   mobNpc('sundays1','sundays','ケンジ',11,11,'#4a3a2a','#a0d8a0'),
+   mobNpc('sundays2','sundays','アヤカ',13,13,'#7a4a6e','#a0d8a0'),
+   mobNpc('sundays3','sundays','リョウコ',10,14,'#2c6e5e','#a0d8a0'),
+   // キッズ（南西）
+   mobNpc('kids1','kids','ユカリ',6,16,'#7a4a6e','#ffd8b0'),
+   mobNpc('kids2','kids','ソラ',8,18,'#5e7a3a','#ffd8b0'),
+   mobNpc('kids3','kids','マホ',5,18,'#6e5e4a','#ffd8b0'),
+   // ツインズ（北東）
+   mobNpc('twins1','twins','レン',28,5,'#3a6e8e','#ffd0e0'),
+   mobNpc('twins2','twins','リン',30,6,'#c25e7a','#ffd0e0'),
+   mobNpc('twins3','twins','ナナミ',28,8,'#5e7a4a','#ffd0e0'),
+   // ファーマーズ（南東）
+   mobNpc('farmers1','farmers','ゲン',27,17,'#3a3a22','#e8d8a0'),
+   mobNpc('farmers2','farmers','ツムギ',29,18,'#8e6a3a','#e8d8a0'),
+   mobNpc('farmers3','farmers','ワタル',31,16,'#7a3a2a','#e8d8a0'),
+   // 街NPC（公園マップ）
+   townNpc('npc_kawai','カワイ',24,17,'#5e4a2c','#e8dcc0',3),
+   townNpc('npc_roku','ロクさん',6,4,'#5e4a3a','#e0d0b8',0),
+  ],
+  spots:[]},
+ /* 駅前: 駅舎とロータリーの広場。商店街からモブ3チーム＋街NPC4人を移して分散 */
+ station:{name:'朝凪駅前',label:'朝凪駅前',labelX:14*TILE,labelY:19*TILE+22,ground:'#83838e',path:'#a8a29a',
+  tiles:STATION_TILES,
+  warps:[{x:19,y:20,to:'street',sx:19,sy:19}],
+  npcs:[
+   // 駅前チーム（駅舎前・西）
+   mobNpc('ekimae21','ekimae2','ユウキ',12,6,'#3a4a3a','#b0c8e8'),
+   mobNpc('ekimae22','ekimae2','アカリ',14,5,'#6e4a7a','#b0c8e8'),
+   mobNpc('ekimae23','ekimae2','コウヘイ',16,7,'#4a5e3a','#b0c8e8'),
+   // 若葉（東）
+   mobNpc('wakaba1','wakaba','ワカバ',28,6,'#4a6a4a','#b0e0c8'),
+   mobNpc('wakaba2','wakaba','イッペイ',30,7,'#8e3a2a','#b0e0c8'),
+   mobNpc('wakaba3','wakaba','フク',27,8,'#5e5e3a','#b0e0c8'),
+   // 偵察（北東端）
+   mobNpc('teisatsu1','teisatsu','キョウヤ',34,5,'#3a5e2c','#c8d8b0'),
+   mobNpc('teisatsu2','teisatsu','スズカ',35,7,'#c25e7a','#c8d8b0'),
+   mobNpc('teisatsu3','teisatsu','リョウマ',33,8,'#4a6a8e','#c8d8b0'),
+   // 街NPC（駅前マップ）
+   townNpc('npc_police','お巡りさん',19,5,'#2c3a5e','#bfe3ff',0),
+   townNpc('npc_michiko','ミチコ',6,16,'#8e6a5e','#ffe0d0',0),
+   townNpc('npc_teruo','テルオ',30,17,'#3a4a5e','#d0d8e8',0),
+   townNpc('npc_zenji','ゼンジ',5,18,'#6e5e2c','#f0e0b0',0),
+  ],
+  spots:[]},
 };
 let curMapId='school';
 function curMap(){return MAPS[curMapId];}
@@ -2769,6 +2843,22 @@ function joinStep(){
   if(!G.library.includes('速川 蓮'))return 'ren';
   if(!G.library.includes('日向 美月'))return 'mizuki';
   return null;
+}
+/* 重要NPCマーカー（Phaser版の頭上「！」表示）の判定。
+   「今そのNPCに話しかけると物語イベントが起きる」NPCの id 一覧を返す:
+   序章が未了なら凪（序章の入口）、物語モードでは現在の加入イベント対象
+   （joinStep。剛太／湊／紗良／蓮／美月）、コア8人が揃った後は公式戦・
+   練習試合・クリア後ルートの入口である凪。章イベントは探索中に自動で
+   差し込まれるためNPCには紐付けない。表示専用の判定で、進行には影響しない */
+function eventNpcIds(){
+  const ids=[];
+  if(!G.introDone){ids.push('nagi');return ids;}
+  if(G.story){
+    const step=joinStep();
+    if(step)ids.push(step);
+    else ids.push('nagi');
+  }
+  return ids;
 }
 /* 選手をライブラリ（と、空きがあればエントリー）へ追加する。スカウトとは別経路の物語加入 */
 function addMember(name){
@@ -3243,7 +3333,7 @@ function shopCheckMenu(){
 function goalText(){
   if(!G.introDone)return '部員を集めよう ― 凪に話しかけよう';
   if(G.story&&coreCount()<8){
-    const hint={gota:'赤城 剛太を誘おう（体育館）',minato:'若林 湊を誘おう（商店街・壁打ち壁の近く）',sara:'大磯 紗良を誘おう（体育館）',ren:'速川 蓮を誘おう（体育館）',mizuki:'日向 美月を誘おう（体育館）'}[joinStep()];
+    const hint={gota:'赤城 剛太を誘おう（体育館）',minato:'若林 湊を誘おう（公園・壁トスの壁の近く）',sara:'大磯 紗良を誘おう（体育館）',ren:'速川 蓮を誘おう（体育館）',mizuki:'日向 美月を誘おう（体育館）'}[joinStep()];
     return '次の目標：部員集め（コア '+coreCount()+'/8人）― '+hint;
   }
   if(G.cleared){
@@ -3331,7 +3421,7 @@ function exploreUpdate(dt){
       }else if(best.id==='nagi'&&G.introDone){
         if(G.story&&coreCount()<8){
           /* 物語モードの第1章: コア8人が揃うまで公式戦は始められない */
-          const hint={gota:'次は剛太。中学時代からのライバル、体育館にいるよ',minato:'次は湊。商店街の壁打ち壁の近くで、一人でトスを上げてる',sara:'次は紗良。体育館で声をかけてみて',ren:'次は蓮。体育館で、居残り練習に混ざってる',mizuki:'あと一人、美月。新入生のサーブ対決が評判だよ'}[joinStep()];
+          const hint={gota:'次は剛太。中学時代からのライバル、体育館にいるよ',minato:'次は湊。公園の壁トスの壁の近くで、一人でトスを上げてる',sara:'次は紗良。体育館で声をかけてみて',ren:'次は蓮。体育館で、居残り練習に混ざってる',mizuki:'あと一人、美月。新入生のサーブ対決が評判だよ'}[joinStep()];
           startDialog([
             {name:'早瀬 凪',text:'公式戦は6人＋リベロがそろわないと出られない。まずは部員集めだね'},
             {name:'早瀬 凪',text:'今はコア'+coreCount()+'人。'+hint},

@@ -157,7 +157,7 @@ async function loadCore(){
     'MAPS:MAPS,TILE:TILE,MW:MW,MH:MH,curMap:curMap,solid:solid,spotAt:spotAt,'+
     'npcLines:npcLines,INTRO_SCENE:INTRO_SCENE,MOB_TEAMS:MOB_TEAMS,'+
     'saveGame:saveGame,loadGame:loadGame,hasSave:hasSave,validSave:validSave,ensureSave:ensureSave,'+
-    'goalText:goalText,hudGoalLine:hudGoalLine,coreCount:coreCount,joinStep:joinStep,'+
+    'goalText:goalText,hudGoalLine:hudGoalLine,coreCount:coreCount,joinStep:joinStep,eventNpcIds:eventNpcIds,'+
     'STAT_NAMES:STAT_NAMES,ELEM:ELEM,RANK:RANK,tech:tech,'+
     'baseOf:baseOf,progOf:progOf,effSt:effSt,effPlayer:effPlayer,'+
     'libPlayers:libPlayers,teamPlayers:teamPlayers,teamProblem:teamProblem,'+
@@ -560,14 +560,16 @@ function buildExploreDecor(scene,map,mapId){
       g.fillStyle(0xffffff,0.5);g.fillRect(wx+11,wy+11,3,4);
     }
   }
-  /* --- 校舎の看板（最大の建物ブロックの正面へ） --- */
-  if(!isStreet&&blocks.length){
+  /* --- 建物の看板（最大の建物ブロックの正面へ。マップ固有の文言は
+       school／station のみ。他マップでは看板を出さない） --- */
+  const SIGN_TEXT={school:'朝 凪 学 園',station:'朝 凪 駅'};
+  if(SIGN_TEXT[mapId]&&blocks.length){
     const b=blocks.reduce((a,c)=>(c.x1-c.x0)>(a.x1-a.x0)?c:a,blocks[0]);
     const cx=(b.x0+b.x1+1)*16,ty=b.y0*32+38;
     g.fillStyle(0x000000,0.25);g.fillRect(cx-72,ty+3,144,24);
     g.fillStyle(0xf2ead6,1);g.fillRect(cx-72,ty,144,24);
     g.lineStyle(2,0x7a6a4a,1);g.strokeRect(cx-72,ty,144,24);
-    scene.add.text(cx,ty+4,'朝 凪 学 園',{fontFamily:FONT,fontSize:'15px',color:'#3a3a4a',fontStyle:'bold'}).setOrigin(0.5,0).setDepth(46);
+    scene.add.text(cx,ty+4,SIGN_TEXT[mapId],{fontFamily:FONT,fontSize:'15px',color:'#3a3a4a',fontStyle:'bold'}).setOrigin(0.5,0).setDepth(46);
   }
   /* --- 商店街のファサード: 店ごとに看板・のれん・ショーウィンドウ --- */
   if(isStreet){
@@ -631,6 +633,10 @@ function buildExploreDecor(scene,map,mapId){
             ['fence',20,15],['fence',21,15],['pot',14,4],['pot',32,4]],
     street:[['vending',36,4],['bench',5,6],['bench',30,9],['board',20,5],['balls',14,10],
             ['bench',22,19],['pot',5,4],['pot',18,4],['fence',18,14],['fence',19,14],['fence',20,14]],
+    park:[['bench',10,9],['bench',28,15],['vending',2,4],['board',30,3],['balls',13,11],
+          ['pot',16,3],['fence',24,15],['fence',25,15],['bench',33,11]],
+    station:[['vending',4,4],['vending',33,4],['bench',10,14],['board',24,5],['pot',17,4],
+             ['pot',22,4],['fence',8,15],['fence',9,15],['bench',28,14]],
   };
   for(const [kind,tx,ty] of (PROPS[mapId]||[])){
     if(occupied.has(tx+','+ty))continue;
@@ -1616,6 +1622,16 @@ class ExploreScene extends Phaser.Scene{
       this.add.sprite(n.x+16,n.y+33,key,'d0').setOrigin(0.5,1).setDepth(n.y+32);
       this.add.text(n.x+16,n.y-38,n.name,{fontFamily:FONT,fontSize:'11px',color:'#ffffff'}).setOrigin(0.5,0).setDepth(n.y+33);
     }
+    /* --- 重要NPCマーカー（頭上の「！」） ---
+       対象は Core の eventNpcIds() で判定する（今話しかけると物語イベントが
+       起きるNPC: 序章の凪／加入イベント対象／コア8人後の凪）。
+       表示可否は update() で毎フレーム再判定し、進行に合わせて付け替える */
+    this.eventMarks={};
+    for(const n of map.npcs){
+      const t=this.add.text(n.x+16,n.y-66,'！',{fontFamily:FONT,fontSize:'15px',color:'#ffffff',fontStyle:'bold',
+        backgroundColor:'#e04a3a',padding:{x:5,y:1}}).setOrigin(0.5,0).setDepth(n.y+35).setVisible(false);
+      this.eventMarks[n.id]={txt:t,npc:n};
+    }
     /* --- 話しかけプロンプト（Core の話しかけ判定＝最寄りNPCまで44px以内・
        向き不問で斜めからも届く、と同じ条件で NPC の頭上に表示する） --- */
     this.talkPrompt=this.add.text(0,0,'▼ 話す',{fontFamily:FONT,fontSize:'12px',color:'#ffffff',
@@ -1683,6 +1699,19 @@ class ExploreScene extends Phaser.Scene{
     }
     if(promptNpc)this.talkPrompt.setPosition(promptNpc.x+16,promptNpc.y-62).setDepth(promptNpc.y+34).setVisible(true);
     else this.talkPrompt.setVisible(false);
+    /* 重要NPCマーカー: 会話・メニュー等が開いている間は隠す。
+       話しかけプロンプトが出ている本人については、プロンプトを優先して隠す */
+    {
+      const markIds=(C.eventNpcIds?C.eventNpcIds():[]);
+      const uiOpen=!!(C.dlg||C.menu||C.lib||C.form||C.profileOpen);
+      const bob=Math.round(Math.sin(time/280)*3);
+      for(const id in this.eventMarks){
+        const mk=this.eventMarks[id];
+        const on=!uiOpen&&markIds.indexOf(id)>=0&&promptNpc!==mk.npc;
+        mk.txt.setVisible(on);
+        if(on)mk.txt.setPosition(mk.npc.x+16,mk.npc.y-66+bob).setDepth(mk.npc.y+35);
+      }
+    }
     /* Core UI の描画（会話→メニュー→プロフィール→ライブラリ→編成の順に重ねる） */
     const v=this.view;v.begin();
     viewDialog(v);
