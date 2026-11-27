@@ -60,6 +60,15 @@ document.addEventListener('dblclick',function(e){e.preventDefault();},{passive:f
    （音源ファイルなし）で、カットイン突入／溜め／打撃／得点の4種。
    ON/OFF は localStorage 'firesix_se' に保存し、タイトル右上か
    M キーで切り替える（演出速度 'firesix_fx' の既存仕様とは独立）。
+   得点時の落下演出（Phaser 側の演出層のみ。Core は不変）:
+   Core は得点の飛行を選手の位置で終えて同フレームに得点を確定させる
+   ため、従来はボールが床に落ちて見えず、スコアもいつの間にか変わって
+   いた。得点を検出したらボールを飛行方向の先の床へ落とし直し（ネット
+   際は跳ね返り）、着地の瞬間に落下点マーカー（フラッシュ円＋リング＋
+   土煙）とホイッスルを出し、1回バウンドして静止させる。スコアボード
+   は表示用スコアを持ち、実スコアとは着地の瞬間に同期させる（＝約
+   0.24 秒の「間」。高速設定では約 0.13 秒）。同期と同時に得点側へ
+   「+1」ポップと点滅ハイライトを出す。
    第4段階の内容: ドット絵を 48×64 に精密化（2段シェーディング＋輪郭線）、
    試合中のアクションポーズ（スパイク／レシーブ／トス／ブロック）、
    ボールの残像・スピンとスパイク決定時のヒットエフェクト、
@@ -205,7 +214,9 @@ function wrapJa(text,widthPx,font){
    に保存し、タイトル画面右上の表示か M キーで切り替える。
    ブラウザの自動再生制限に配慮し、AudioContext は初回のユーザー操作
    （pointerdown／keydown）で初期化・再開する。鳴動は SE.log に記録し、
-   動作確認用に window.FS_SE から参照できる。音量は控えめ（master 0.22） */
+   動作確認用に window.FS_SE から参照できる。音量は控えめ（master 0.22）。
+   得点時は着地の瞬間にホイッスル（whistle）を鳴らし、得点ジングルは
+   少し遅れて続く（MatchScene の落下演出と連動） */
 const SE=(()=>{
   let ctx=null,master=null,noiseBuf=null;
   let enabled=true;
@@ -284,10 +295,30 @@ const SE=(()=>{
       noise({dur:0.13,vol:0.55*v+0.15,type:'lowpass',f0:1100,f1:220});
       tone({f0:250,f1:52,type:'sine',dur:0.2,vol:0.65*v+0.1});
     });},
-    /* 得点: 自チームは上昇2音、相手は下降2音 */
-    score:function(mine){play('score',()=>{
-      if(mine){tone({f0:659,type:'triangle',dur:0.1,vol:0.26});tone({f0:880,type:'triangle',dur:0.16,vol:0.26,delay:0.09});}
-      else{tone({f0:392,type:'triangle',dur:0.1,vol:0.2});tone({f0:311,type:'triangle',dur:0.16,vol:0.2,delay:0.09});}
+    /* 得点: 自チームは上昇2音、相手は下降2音。delay はホイッスルの後に
+       ずらして鳴らすために使う（着地インパクトのタイミングで呼ばれる） */
+    score:function(mine,delay){const dl=delay||0;play('score',()=>{
+      if(mine){tone({f0:659,type:'triangle',dur:0.1,vol:0.26,delay:dl});tone({f0:880,type:'triangle',dur:0.16,vol:0.26,delay:dl+0.09});}
+      else{tone({f0:392,type:'triangle',dur:0.1,vol:0.2,delay:dl});tone({f0:311,type:'triangle',dur:0.16,vol:0.2,delay:dl+0.09});}
+    });},
+    /* ホイッスル: 得点確定（ボールの着地）の瞬間に鳴らす審判の笛。
+       約2350Hz の矩形波に LFO で細かい震え（トリル）を付け、バンドパスで
+       笛らしく整形する。息のノイズも薄く重ねる */
+    whistle:function(){play('whistle',()=>{
+      const t0=ctx.currentTime;
+      const osc=ctx.createOscillator();osc.type='square';osc.frequency.value=2350;
+      const lfo=ctx.createOscillator();lfo.frequency.value=38;
+      const lfoG=ctx.createGain();lfoG.gain.value=170;
+      lfo.connect(lfoG);lfoG.connect(osc.frequency);
+      const bp=ctx.createBiquadFilter();bp.type='bandpass';bp.frequency.value=2350;bp.Q.value=2.2;
+      const g=ctx.createGain();
+      g.gain.setValueAtTime(0,t0);
+      g.gain.linearRampToValueAtTime(0.14,t0+0.02);
+      g.gain.setValueAtTime(0.14,t0+0.20);
+      g.gain.exponentialRampToValueAtTime(0.0008,t0+0.32);
+      osc.connect(bp);bp.connect(g);g.connect(master);
+      osc.start(t0);osc.stop(t0+0.38);lfo.start(t0);lfo.stop(t0+0.38);
+      noise({dur:0.28,vol:0.045,f0:2400,q:3,a:0.015});
     });},
   };
 })();
@@ -1125,6 +1156,7 @@ class OpView{
     t.setFontSize(size||15);
     t.setColor(color||'#ffffff');
     t.setFontStyle(opt.bold?'bold':'');
+    t.setAlpha(opt.alpha===undefined?1:opt.alpha);
     t.setOrigin(opt.ox||0,opt.oy||0);
     t.setLineSpacing(opt.ls||0);
     t.setText(s===undefined||s===null?'':String(s));
@@ -1808,6 +1840,17 @@ class MatchScene extends Phaser.Scene{
        hitStopT: ヒットストップ残り秒（この間 Core の進行を止める） */
     this.lbProg=0;this.prevCutin=null;this.lastCutin=null;
     this.flightElem=null;this.justScoredElem=null;this.hitStopT=0;
+    /* --- 得点時の落下演出用（Phaser 側のみ） ---
+       Core は得点の飛行を「選手の位置」で終えて同フレームに得点を確定
+       させるため、床に落ちた感がない。ここでは得点検出を契機に、ボール
+       を飛行方向の先の床へ落とし直す演出（drop）を Phaser 側だけで行う。
+       drop: {sx,sy,lx,ly,t,dur,phase:'fall'|'bounce'|'rest',bt,side,gx,gy,h}
+       landFx: 着地マーカー（フラッシュ円＋リング＋土煙）の列
+       dispScoreA/H: 表示用スコア。実スコアとは着地の瞬間までずらす
+       scorePop: 得点側の「+1」ポップと点滅 {side,t}
+       lastFlightDir: 直近の飛行方向（落下先の決定に使う） */
+    this.drop=null;this.landFx=[];this.scorePop=null;
+    this.dispScoreA=0;this.dispScoreH=0;this.lastFlightDir=null;this._dispFor=null;
     /* --- カットイン用（顔ドット絵＋属性エフェクト） --- */
     this.cutinFor=null;
     this.cutinFx=this.add.graphics().setDepth(940).setVisible(false);
@@ -1841,6 +1884,7 @@ class MatchScene extends Phaser.Scene{
       for(const p of [...C.M.A.all,...C.M.H.all])this.ensureCutin(p);
       this.lastScore=C.M.scoreA+C.M.scoreH;
       this.lastScoreA=C.M.scoreA;this.lastScoreH=C.M.scoreH;
+      this.dispScoreA=C.M.scoreA;this.dispScoreH=C.M.scoreH;this._dispFor=C.M;
     }
     /* --- 描画ビュー（パネル／カットイン／結果／メニュー） --- */
     this.view=new OpView(this,900,120);
@@ -1962,6 +2006,58 @@ class MatchScene extends Phaser.Scene{
     e.pose=pose;
   }
   /* ボールの残像とヒットエフェクト（閃光・スピード線・火花）を描く */
+  /* 得点検出時に落下演出を開始する。開始点は飛行の終点（= M.ball の凍結
+     位置）で、着地点は飛行方向へ 30px 進めた床の位置。飛行がネット
+     （x=480）で終わった場合（ブロック得点）は方向を反転し、攻撃側の
+     コートに落ちるようにする。着地点はコート周辺にクランプする */
+  startDrop(M,side){
+    let dx=0,dy=1;
+    if(this.lastFlightDir){dx=this.lastFlightDir.dx;dy=this.lastFlightDir.dy;}
+    const sx=M.ball.x,sy=M.ball.y;
+    if(Math.abs(sx-480)<=3&&Math.abs(dx)>0.3)dx=-dx; /* ネット際は跳ね返る */
+    const lx=clamp(sx+dx*30,168,792),ly=clamp(sy+dy*30,76,452);
+    this.drop={sx:sx,sy:sy,lx:lx,ly:ly,t:0,bt:0,phase:'fall',side:side,
+      dur:Core.fxFast()?0.13:0.24,gx:sx,gy:sy,h:16};
+  }
+  /* 落下演出の進行。fall（床へ落ちる＋影が近づく）→ 着地の瞬間に
+     マーカー／ホイッスル／表示スコア同期／+1 ポップ → bounce（1回だけ
+     小さく跳ねて小さな土煙）→ rest（次ラリーまで着地点に静止）。
+     新しい飛行が始まるか、ラリーが切り替わったら演出を終える */
+  updateDrop(M,dt){
+    const d=this.drop;if(!d)return;
+    if(M.ballAnim||(d.phase==='rest'&&M.phase!=='point'&&M.phase!=='over')){
+      this.drop=null;this.dispScoreA=M.scoreA;this.dispScoreH=M.scoreH;return;
+    }
+    if(d.phase==='fall'){
+      d.t+=dt/d.dur;
+      const t=Math.min(1,d.t),e=t*t;
+      d.gx=d.sx+(d.lx-d.sx)*e;d.gy=d.sy+(d.ly-d.sy)*e;
+      d.h=16*(1-t)*(1-t);
+      this.ballSpr.setPosition(d.gx,d.gy-d.h);
+      this.ballSpr.rotation=0;this.ballSpr.setScale(1+0.1*(1-t));
+      if(t>=1){ /* 着地の瞬間 */
+        d.phase='bounce';d.bt=0;d.h=0;
+        this.landFx.push({x:d.lx,y:d.ly,t:0,dur:0.42,small:false});
+        SE.whistle();SE.score(d.side==='A',0.16);
+        this.dispScoreA=M.scoreA;this.dispScoreH=M.scoreH;
+        this.scorePop={side:d.side,t:0};
+      }
+    }else if(d.phase==='bounce'){
+      d.bt+=dt/(Core.fxFast()?0.16:0.30);
+      const bt=Math.min(1,d.bt);
+      d.gx=d.lx;d.gy=d.ly;d.h=Math.sin(bt*Math.PI)*9;
+      this.ballSpr.setPosition(d.lx,d.ly-d.h);
+      this.ballSpr.rotation=0;this.ballSpr.setScale(1);
+      if(bt>=1){
+        d.phase='rest';d.h=0;
+        this.landFx.push({x:d.lx,y:d.ly,t:0,dur:0.30,small:true});
+      }
+    }else{ /* rest: 着地点に静止したまま */
+      d.gx=d.lx;d.gy=d.ly;d.h=0;
+      this.ballSpr.setPosition(d.lx,d.ly);
+      this.ballSpr.rotation=0;this.ballSpr.setScale(1);
+    }
+  }
   drawBallFx(dt){
     const fx=this.fxG;fx.clear();
     const MM=Core.M;
@@ -2036,6 +2132,31 @@ class MatchScene extends Phaser.Scene{
         fx.fillRect(h.x+Math.cos(a)*d-1.5,h.y+Math.sin(a)*d-1.5,3,3);
       }
     }
+    /* 落下中のボールの影: 着地点に固定され、ボールが近づくほど濃く
+       大きくなる。ボール本体は updateDrop が影の真上へ寄せていく */
+    if(this.drop){
+      const d=this.drop,hh=d.h||0;
+      const sa=clamp(0.30-hh*0.008,0.10,0.30),sr=13-hh*0.25;
+      fx.fillStyle(0x1a2410,sa);fx.fillEllipse(d.gx,d.gy+4,Math.max(8,sr*2),Math.max(4,sr*0.8));
+    }
+    /* 着地マーカー: 着地の瞬間にフラッシュする円＋拡散リング＋土煙。
+       イン／アウトの判定位置が目で追えるよう、中心を少し残して消える */
+    this.landFx=this.landFx.filter(h=>(h.t+=dt)<h.dur);
+    for(const h of this.landFx){
+      const k=h.t/h.dur,R=h.small?16:30;
+      /* フラッシュ円（中心） */
+      fx.fillStyle(0xffffff,(h.small?0.35:0.55)*(1-k));fx.fillCircle(h.x,h.y,(h.small?6:10)*(1-k*0.4));
+      fx.fillStyle(0xffd76a,0.35*(1-k));fx.fillCircle(h.x,h.y,(h.small?10:16)*(0.5+k*0.5));
+      /* 拡散リング */
+      fx.lineStyle(h.small?2:3,0xffe9a0,0.85*(1-k));fx.strokeCircle(h.x,h.y,4+k*R);
+      fx.lineStyle(2,0xffffff,0.5*(1-k));fx.strokeCircle(h.x,h.y,2+k*R*0.55);
+      /* 土煙: 木目フロアに広がって沈む粒子 */
+      for(let i=0;i<6;i++){
+        const a=i*1.047+h.x*0.01,dd=k*(h.small?13:22);
+        fx.fillStyle(i%2?0xb8862f:0x8a6a3a,0.5*(1-k));
+        fx.fillCircle(h.x+Math.cos(a)*dd,h.y+Math.sin(a)*dd*0.6+2,Math.max(1.2,(h.small?3:4.2)*(1-k*0.5)));
+      }
+    }
   }
   update(time,delta){
     const C=Core;
@@ -2051,6 +2172,12 @@ class MatchScene extends Phaser.Scene{
     if(C.scene!=='match'){this.scene.start('Explore');return;}
     const M=C.M;
     if(!M)return;
+    /* 試合オブジェクトが替わったら表示用スコアと落下演出を実状態に合わせる */
+    if(this._dispFor!==M){
+      this._dispFor=M;
+      this.dispScoreA=M.scoreA;this.dispScoreH=M.scoreH;
+      this.drop=null;this.landFx=[];this.scorePop=null;
+    }
     /* --- カットインの開始／終了を検出して演出フックを打つ --- */
     if(M.cutin&&this.prevCutin!==M.cutin){
       SE.cutin();SE.charge(C.fxFast());
@@ -2118,6 +2245,9 @@ class MatchScene extends Phaser.Scene{
     }else{
       if(this.lastAnim){ /* 飛行終了: スパイクのネット接触で閃光 */
         if(this.flightSpike)this.hitFx.push({x:480,y:this.lastAnim.y1,t:0,dur:0.3,big:false});
+        /* 飛行方向を記録する（得点時の落下先を決めるのに使う） */
+        const la=this.lastAnim,fdx=la.x1-la.x0,fdy=la.y1-la.y0,fll=Math.hypot(fdx,fdy);
+        if(fll>1)this.lastFlightDir={dx:fdx/fll,dy:fdy/fll};
         this.lastAnim=null;this.flightSpike=false;
         /* 得点は飛行終了と同フレームに確定するので、属性は得点判定まで保持 */
         this.justScoredElem=this.flightElem;this.flightElem=null;
@@ -2131,24 +2261,48 @@ class MatchScene extends Phaser.Scene{
     if(sc!==this.lastScore){
       if(this.recentAtt&&time<this.recentAtt.until+600)
         this.hitFx.push({x:M.ball.x,y:M.ball.y,t:0,dur:0.45,big:true});
-      /* 得点音＋、必殺技で決まった点なら強めのヒットストップとシェイク */
-      SE.score(M.scoreA>this.lastScoreA);
+      /* 必殺技で決まった点なら強めのヒットストップとシェイク */
       const fe=this.flightElem||this.justScoredElem;
       if(fe){
         const hs=HITSTOP_P[fe.rank]||0.07;
         this.hitStopT=Math.max(this.hitStopT,C.fxFast()?hs*0.4:hs);
         this.cameras.main.shake(170,SHAKE_P[fe.rank]||0.003);
       }
+      /* 落下演出を開始する。ホイッスル／得点音／表示スコアの更新は
+         ボールが床に着いた瞬間（updateDrop の着地判定）に寄せる。
+         これが「いつ落ちたか」を分かりやすくする肝になる */
+      this.startDrop(M,M.scoreA>this.lastScoreA?'A':'H');
       this.lastCutin=null; /* ラリー終了。次のラリーの飛行へ誤って付けない */
       this.lastScore=sc;this.lastScoreA=M.scoreA;this.lastScoreH=M.scoreH;
     }
     this.justScoredElem=null;
+    /* 落下演出の進行と、表示スコアの安全同期（演出が無い経路では即追随） */
+    this.updateDrop(M,dt);
+    if(!this.drop&&!this.scorePop&&(this.dispScoreA!==M.scoreA||this.dispScoreH!==M.scoreH)){
+      this.dispScoreA=M.scoreA;this.dispScoreH=M.scoreH;
+    }
+    if(this.scorePop){this.scorePop.t+=dt;if(this.scorePop.t>0.85)this.scorePop=null;}
     this.drawBallFx(dt);
     /* --- パネル類の描画 --- */
     const v=this.view;v.begin();
-    /* スコアボード */
+    /* スコアボード（表示用スコアを使う。実スコアとは着地の瞬間まで
+       ずれるのが仕様で、「ボールが落ちた＝点が入った」を一致させる）。
+       得点直後は得点側の半分が金色に点滅し、数字が金色になる */
     v.rect(230,8,500,44,0x080c1c,0.92);
-    v.text(480,16,M.myName+' '+M.scoreA+' ― '+M.scoreH+' '+M.oppName,22,'#ffffff',{bold:true,ox:0.5});
+    if(this.scorePop){
+      const pk=Math.min(1,this.scorePop.t/0.85);
+      const blink=(Math.sin(this.scorePop.t*36)>0?0.30:0.10)*(1-pk*0.5);
+      v.rect(this.scorePop.side==='A'?234:484,12,242,36,0xffd76a,blink);
+    }
+    const popA=this.scorePop&&this.scorePop.side==='A',popH=this.scorePop&&this.scorePop.side==='H';
+    v.text(466,16,M.myName+' '+this.dispScoreA,22,popA?'#ffd76a':'#ffffff',{bold:true,ox:1});
+    v.text(480,16,'―',22,'#ffffff',{bold:true,ox:0.5});
+    v.text(494,16,this.dispScoreH+' '+M.oppName,22,popH?'#ffd76a':'#ffffff',{bold:true,ox:0});
+    /* 「+1」ポップ: 得点側の数字のそばで上昇しながら消える */
+    if(this.scorePop){
+      const pk=Math.min(1,this.scorePop.t/0.85);
+      v.text(this.scorePop.side==='A'?446:514,58-pk*20,'+1',20,'#ffd76a',{bold:true,ox:0.5,alpha:1-pk});
+    }
     v.text(736,TY(32,12),'● '+(M.serve==='A'?M.myName:M.oppName)+'サーブ',12,'#ffd76a');
     /* メッセージバー（試合結果の表示中は結果文をパネル側に任せ、
        バーには描かない。「探索に戻る」メニューとの重なりを避ける） */
