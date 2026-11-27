@@ -47,6 +47,9 @@ document.addEventListener('dblclick',function(e){e.preventDefault();},{passive:f
    メニュー・会話・試合コマンド選択）、縦持ち時の横持ち推奨案内、
    スクロール／ズーム抑止、PWA風 manifest＋アイコン（ホーム画面追加）。
    タッチUIは (pointer: coarse) の端末でのみ表示し、PCでは出さない。
+   会話ウィンドウには話者の顔を表示する（本人カットインイラストが
+   manifest にある話者はイラストの顔切り抜き、無い話者は歩行チップと
+   同じ割り当てのドット顔。ナレーション行は顔なし）。
    第4段階の内容: ドット絵を 48×64 に精密化（2段シェーディング＋輪郭線）、
    試合中のアクションポーズ（スパイク／レシーブ／トス／ブロック）、
    ボールの残像・スピンとスパイク決定時のヒットエフェクト、
@@ -963,6 +966,7 @@ class TouchScene extends Phaser.Scene{
 /* ---------- 描画ヘルパー: 矩形＋テキストの「オプ」を毎フレーム適用する ---------- */
 class OpView{
   constructor(scene,depth,poolSize){
+    this.scene=scene;
     this.g=scene.add.graphics().setDepth(depth).setScrollFactor(0);
     this.pool=[];
     const n=poolSize||110;
@@ -970,8 +974,30 @@ class OpView{
       this.pool.push(scene.add.text(0,0,'',{fontFamily:FONT,fontSize:'15px',color:'#ffffff'}).setDepth(depth+1).setVisible(false).setScrollFactor(0));
     }
     this.used=0;
+    /* 会話の顔表示専用の Image（テクスチャ画像は Graphics では描けないため
+       別枠で持つ。begin() で毎フレーム隠し、viewDialog が話者ありの行の
+       時だけ face() で出す。それ以外の画面には一切出ない） */
+    if(!scene.textures.exists('__dlgface_blank')){
+      const bcv=document.createElement('canvas');bcv.width=1;bcv.height=1;
+      scene.textures.addCanvas('__dlgface_blank',bcv);
+    }
+    this.faceImg=scene.add.image(0,0,'__dlgface_blank').setDepth(depth+1).setVisible(false).setScrollFactor(0).setOrigin(0,0);
+    this.faceKey=null;this.faceCrop=null;
   }
-  begin(){this.g.clear();this.used=0;}
+  begin(){this.g.clear();this.used=0;this.faceImg.setVisible(false);}
+  /* 顔テクスチャを (x,y) に size×size で表示する。
+     crop はテクスチャ画素での切り抜き {x,y,w,h}（null なら全体） */
+  face(key,x,y,size,crop){
+    const img=this.faceImg;
+    const ck=crop?(crop.x+','+crop.y+','+crop.w+','+crop.h):'';
+    if(this.faceKey!==key||this.faceCrop!==ck){
+      img.setTexture(key);
+      if(crop)img.setCrop(crop.x,crop.y,crop.w,crop.h);
+      else img.setCrop(0,0,img.frame.realWidth||img.frame.width,img.frame.realHeight||img.frame.height);
+      this.faceKey=key;this.faceCrop=ck;
+    }
+    img.setPosition(x,y);img.setDisplaySize(size,size);img.setVisible(true);
+  }
   rect(x,y,w,h,fill,alpha){
     this.g.fillStyle(fill,alpha===undefined?1:alpha);this.g.fillRect(x,y,w,h);
   }
@@ -998,6 +1024,127 @@ class OpView{
 /* Canvas の fillText（ベースライン指定）を Phaser（左上原点）に寄せるための補正 */
 const TY=(y,size)=>y-(size||15)+3;
 
+/* ---------- 会話の顔表示（話者イラスト／ドット顔の解決） ----------
+   2段構え:
+   1段目: 本人カットインイラスト（assets/cutin/<フルネーム（空白除去）>）が
+     manifest.json にある話者は、イラストの顔まわりを切り抜いて表示する。
+     manifest は実行時に取得し、有無は毎回 manifest で判定する。読み込みが
+     終わるまではドット顔を出し、完了したフレームから自動でイラストに
+     切り替わる。後からイラストが追加されても、manifest に載れば
+     コード変更なしで切り替わる。
+   2段目: イラストが無い話者（NPC・モブ・その他）は、歩行チップと同じ
+     髪型・肌色で生成するドット顔（makeFaceTexture）を表示する。
+     NPC はマップデータの hair/uni/名前シード、選手は Core の hair＋属性色、
+     どちらにも無い大人等の話者は名前ハッシュから決定的に割り当てる。 */
+/* イラストの顔切り抜き定義（中心 cx,cy = 画像に対する割合、一辺 s = 画像の
+   高さに対する割合）。実イラストの顔位置に合わせて調整済み。
+   定義が無い話者は FACE_CROP_DEFAULT（上半身構図の顔想定位置）を使う。
+   久住そら・深沢ほのかはデフォルト範囲で顔が収まるため定義なし */
+const FACE_CROPS={
+  '高嶺陽翔':{cx:0.66,cy:0.34,s:0.66},
+  '早瀬凪':{cx:0.305,cy:0.355,s:0.72},
+  '若林湊':{cx:0.52,cy:0.385,s:0.55},
+  '大磯紗良':{cx:0.50,cy:0.375,s:0.60},
+  '赤城剛太':{cx:0.56,cy:0.285,s:0.62},
+  '石動健吾':{cx:0.545,cy:0.35,s:0.52},
+  '速川蓮':{cx:0.475,cy:0.26,s:0.55},
+  '日向美月':{cx:0.50,cy:0.34,s:0.58},
+  '高峰烈':{cx:0.575,cy:0.36,s:0.62},
+  '沢渡駆':{cx:0.475,cy:0.28,s:0.52},
+  '佐久間亮介':{cx:0.548,cy:0.255,s:0.58},
+  '小森悠真':{cx:0.437,cy:0.307,s:0.846},
+  '速水葵':{cx:0.403,cy:0.35,s:0.82},
+  '桐原理世':{cx:0.44,cy:0.362,s:0.794},
+  '水原梓':{cx:0.511,cy:0.488,s:0.965},
+  '鉄原巌':{cx:0.51,cy:0.413,s:0.741},
+  '浅葱颯':{cx:0.593,cy:0.323,s:0.719},
+  '梶原美緒':{cx:0.425,cy:0.278,s:0.742},
+  '風宮澪':{cx:0.593,cy:0.329,s:0.837},
+  '黒木朔夜':{cx:0.38,cy:0.375,s:1.0},
+  '黒岩怜奈':{cx:0.411,cy:0.363,s:0.944},
+  '白鳥悠人':{cx:0.471,cy:0.38,s:1.0},
+  '霧島征爾':{cx:0.383,cy:0.248,s:0.58},
+};
+const FACE_CROP_DEFAULT={cx:0.5,cy:0.32,s:0.62};
+const DLG_ILLU={manifest:null,fetching:false,queue:[],queued:new Set()};
+/* manifest 上の本人イラストのファイル名を返す。
+   戻り値: ファイル名／null=イラスト無し／undefined=manifest 取得中 */
+function dlgIlluFile(nm){
+  if(!DLG_ILLU.manifest)return undefined;
+  if(DLG_ILLU.manifest.has(nm+'.webp'))return nm+'.webp';
+  if(DLG_ILLU.manifest.has(nm+'.png'))return nm+'.png';
+  return null;
+}
+/* 本人イラストの読み込みを開始する（テクスチャはゲーム全体で共有される。
+   試合シーンが読み込み済みの 'cutin_' テクスチャがあればそれを使う） */
+function ensureDlgIllu(scene,nm){
+  if(scene.textures.exists('dlgillu_'+nm)||scene.textures.exists('cutin_'+nm))return;
+  if(scene.__dlgIlluLoading&&scene.__dlgIlluLoading.has(nm))return;
+  const file=dlgIlluFile(nm);
+  if(file===undefined){
+    if(!DLG_ILLU.fetching){
+      DLG_ILLU.fetching=true;
+      fetch('assets/cutin/manifest.json').then(r=>r.ok?r.json():[]).then(list=>{
+        DLG_ILLU.manifest=new Set(Array.isArray(list)?list:[]);
+        const q=DLG_ILLU.queue.splice(0);DLG_ILLU.queued.clear();
+        for(const [s,n] of q)ensureDlgIllu(s,n);
+      }).catch(()=>{DLG_ILLU.manifest=new Set();DLG_ILLU.queue.splice(0);DLG_ILLU.queued.clear();});
+    }
+    if(!DLG_ILLU.queued.has(nm)){DLG_ILLU.queued.add(nm);DLG_ILLU.queue.push([scene,nm]);}
+    return;
+  }
+  if(!file)return;
+  scene.__dlgIlluLoading=scene.__dlgIlluLoading||new Set();
+  scene.__dlgIlluLoading.add(nm);
+  scene.load.image('dlgillu_'+nm,'assets/cutin/'+encodeURIComponent(file));
+  scene.load.start();
+}
+/* 話者の顔を解決する。戻り値 {key, crop}（crop=null はドット顔＝全体表示） */
+function dlgFace(scene,name){
+  const C=Core;
+  const nm=String(name||'').replace(/[\s　]/g,'');
+  if(!nm)return null;
+  /* 1段目: 本人イラスト */
+  ensureDlgIllu(scene,nm);
+  for(const key of ['cutin_'+nm,'dlgillu_'+nm]){
+    if(!scene.textures.exists(key))continue;
+    if(key.indexOf('cutin_')===0&&scene.cutinReg){
+      const rec=scene.cutinReg.get(key);
+      if(rec&&rec.status!=='ok')continue;
+    }
+    const src=scene.textures.get(key).getSourceImage();
+    if(!src||!src.width)continue;
+    /* 切り抜きは専用キャンバステクスチャに焼き込んでから表示する
+       （Image の setCrop は表示スケール計算と干渉するため使わない） */
+    const faceKey='dlgface_'+nm;
+    if(!scene.textures.exists(faceKey)){
+      const d=FACE_CROPS[nm]||FACE_CROP_DEFAULT;
+      const side=Math.min(d.s*src.height,src.width,src.height);
+      const x=Math.max(0,Math.min(src.width-side,d.cx*src.width-side/2));
+      const y=Math.max(0,Math.min(src.height-side,d.cy*src.height-side/2));
+      const cv=document.createElement('canvas');cv.width=160;cv.height=160;
+      cv.getContext('2d').drawImage(src,x,y,side,side,0,0,160,160);
+      scene.textures.addCanvas(faceKey,cv);
+    }
+    return {key:faceKey,crop:null};
+  }
+  /* 2段目: ドット顔 */
+  if(nm==='高嶺陽翔')return {key:makeFaceTexture(scene,'#a03c28','#bfe3ff','高嶺 陽翔'),crop:null};
+  let npc=null,npcSuf=null;
+  for(const mid in C.MAPS)for(const n of C.MAPS[mid].npcs){
+    if(n.name===name)npc=n;
+    else if(n.name&&name.length>n.name.length&&name.endsWith(n.name)&&(!npcSuf||n.name.length>npcSuf.name.length))npcSuf=n;
+  }
+  const nn=npc||npcSuf;
+  if(nn)return {key:makeFaceTexture(scene,nn.hair,nn.uni,nn.name),crop:null};
+  const p=C.baseOf(name);
+  if(p)return {key:makeFaceTexture(scene,p.hair,C.ELEM[p.elem].c,p.name),crop:null};
+  const hs=hashStr(nm);
+  const HAIRS=['#3a3a44','#5e4632','#26355e','#7a4a22','#2c2c2c','#4a2c3a','#6e5e3a','#8e2a1e'];
+  const UNIS=['#cbb','#bfe3ff','#d8e0f0','#e8dcc0','#c8ccd8','#d0d8e8','#ffe0d0','#d8ffd0'];
+  return {key:makeFaceTexture(scene,HAIRS[hs%HAIRS.length],UNIS[(hs>>>4)%UNIS.length],nm),crop:null};
+}
+
 /* ---------- Core の会話（dlg）を描く ---------- */
 function viewDialog(v){
   const C=Core,dlg=C.dlg;
@@ -1005,8 +1152,17 @@ function viewDialog(v){
   const L=dlg.lines[Math.min(dlg.i,dlg.lines.length-1)];
   v.rect(30,428,900,96,0x080c1c,0.94);v.stroke(30,428,900,96,0x8fb7ff,2);
   v.stroke(34,432,892,88,0x2a4a7a,1);
-  if(L.name){v.rect(46,436,150,26,0x1d3a5f,1);v.text(54,TY(458,17),L.name,17,'#ffd76a',{bold:true});}
-  v.text(52,464,wrapJa(L.text||'',850,'18px sans-serif'),18,'#ffffff',{ls:6});
+  if(L.name){
+    /* 話者の顔を左の枠内に表示し、名前タグと本文はその分右へずらす */
+    const f=dlgFace(v.scene,L.name);
+    v.rect(42,434,84,84,0x101a30,1);v.stroke(42,434,84,84,0x8fb7ff,1);
+    if(f)v.face(f.key,44,436,80,f.crop);
+    v.rect(136,436,200,26,0x1d3a5f,1);v.text(144,TY(458,17),L.name,17,'#ffd76a',{bold:true});
+    v.text(136,464,wrapJa(L.text||'',776,'18px sans-serif'),18,'#ffffff',{ls:6});
+  }else{
+    /* ナレーション行は顔なし・従来レイアウトのまま */
+    v.text(52,464,wrapJa(L.text||'',850,'18px sans-serif'),18,'#ffffff',{ls:6});
+  }
   v.text(920,TY(514,12),'▼',12,'#99aabb');
 }
 /* ---------- Core のメニュー（menu）を描く ---------- */
